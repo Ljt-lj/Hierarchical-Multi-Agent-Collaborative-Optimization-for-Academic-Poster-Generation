@@ -1,0 +1,8 @@
+{
+  "description": "Paper2Poster 风格批量测试清单",
+  "papers": [
+    {"id": "demo_001", "demo": true},
+    {"id": "demo_002", "demo": true},
+    {"id": "demo_003", "demo": true}
+  ]
+}
