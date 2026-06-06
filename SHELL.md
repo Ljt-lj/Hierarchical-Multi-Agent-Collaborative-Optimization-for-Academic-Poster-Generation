@@ -105,13 +105,14 @@ pip install -r requirements.txt
 pip install -r training/requirements.txt
 pip uninstall bitsandbytes -y    # AMD 必须去掉
 
-# 1) 数据（训练最小集：只需 P2PInstruct；P2PEval/PosterSum 可选）
-python training/data/download.py --dataset train_minimal --max-rows 500
+# 1) 数据（勿用 train[:500]，前段几乎全是 figure descriptor）
+python training/data/download.py --dataset p2p_instruct \
+  --refiner-quota 500 --visual-quota 200
 
-# 或分别下载（P2PEval 失败不影响训练）
-python training/data/download.py --dataset p2p_instruct --max-rows 500
-python training/data/download.py --dataset p2p_eval          # 评测用，可稍后重试
-python training/data/download.py --dataset poster_sum          # 增强用，可稍后重试
+# 或一键最小训练集（默认 refiner 400 + visual 100）
+python training/data/download.py --dataset train_minimal
+
+python training/data/build_sft.py
 
 # 2) 训练 Refiner（指定本地模型，不再联网拉取）
 python training/train/train_lora.py \
