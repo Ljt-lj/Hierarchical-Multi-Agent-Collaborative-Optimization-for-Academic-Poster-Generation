@@ -62,7 +62,27 @@ python training/scripts/check_gpu.py
 
 应看到 `GPU 可用 (torch.cuda): True` 且设备名含 AMD / gfx。
 
-### A.2 安装 ROCm 版 PyTorch（若 GPU 不可用）
+### A.2 下载基座模型（训练前必做，避免 HF 超时）
+
+7B 约 15GB，网络不稳定时建议 **ModelScope**（阿里云 DSW 通常更稳）：
+
+```bash
+pip install modelscope
+
+# 方式 1：脚本（推荐）
+python training/scripts/download_model.py --model qwen2.5-7b --source modelscope
+
+# 方式 2：显存/网络有限，用 1.5B（约 3GB）
+python training/scripts/download_model.py --model qwen2.5-1.5b --source modelscope
+
+# 方式 3：HF 镜像 + 断点续传（若已下到 11GB 失败，可续传）
+export HF_ENDPOINT=https://hf-mirror.com
+huggingface-cli download Qwen/Qwen2.5-7B-Instruct \
+  --local-dir training/models/Qwen2.5-7B-Instruct \
+  --resume-download
+```
+
+### A.3 安装 ROCm 版 PyTorch（若 GPU 不可用）
 
 ```bash
 pip uninstall torch torchvision torchaudio bitsandbytes -y
@@ -76,7 +96,7 @@ export HSA_OVERRIDE_GFX_VERSION=10.3.0
 python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
-### A.3 AMD 云完整训练流程
+### A.4 AMD 云完整训练流程
 
 ```bash
 export HF_ENDPOINT=https://hf-mirror.com
@@ -93,8 +113,11 @@ python training/data/download.py --dataset p2p_instruct --max-rows 500
 python training/data/download.py --dataset p2p_eval          # 评测用，可稍后重试
 python training/data/download.py --dataset poster_sum          # 增强用，可稍后重试
 
-# 2) 训练 Refiner（AMD 专用配置，fp16 LoRA，无 4bit）
-python training/train/train_lora.py --config training/configs/train_refiner_rocm.yaml
+# 2) 训练 Refiner（指定本地模型，不再联网拉取）
+python training/train/train_lora.py \
+  --config training/configs/train_refiner_rocm.yaml \
+  --model-path training/models/Qwen2.5-7B-Instruct \
+  --max-samples 200
 
 # 3) 训练 Visual（可选）
 python training/train/train_lora.py --config training/configs/train_visual_rocm.yaml

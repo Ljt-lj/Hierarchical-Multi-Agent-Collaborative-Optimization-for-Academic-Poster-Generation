@@ -30,6 +30,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="LoRA 微调海报 Agent")
     parser.add_argument("--config", type=Path, default=TRAIN_ROOT / "configs" / "train_refiner.yaml")
     parser.add_argument("--max-samples", type=int, default=None, help="调试：限制训练样本数")
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        default=None,
+        help="本地基座模型目录（优先于 config 中的 base_model）",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -67,8 +73,25 @@ def main() -> int:
     if cfg.get("load_in_4bit") and platform.system() == "Windows":
         print("[提示] Windows 未启用 4bit 量化，使用 fp16/bf16 全精度加载（需更大显存）")
 
-    model_name = cfg["base_model"]
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    model_name = str(args.model_path) if args.model_path else cfg["base_model"]
+    local_only = False
+    if args.model_path:
+        if not args.model_path.exists():
+            print(f"[错误] 本地模型不存在: {args.model_path}")
+            print("请先: python training/scripts/download_model.py --model qwen2.5-7b")
+            return 1
+        local_only = True
+        print(f"从本地加载模型: {model_name}")
+    elif cfg.get("local_model_dir"):
+        local_path = resolve_path(TRAIN_ROOT, cfg["local_model_dir"])
+        if local_path.exists():
+            model_name = str(local_path)
+            local_only = True
+            print(f"从配置本地路径加载: {model_name}")
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name, trust_remote_code=True, local_files_only=local_only
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -87,6 +110,7 @@ def main() -> int:
         torch_dtype=torch.bfloat16 if cfg.get("bf16") else torch.float16,
         device_map="auto",
         trust_remote_code=True,
+        local_files_only=local_only,
     )
     if use_4bit:
         model = prepare_model_for_kbit_training(model)

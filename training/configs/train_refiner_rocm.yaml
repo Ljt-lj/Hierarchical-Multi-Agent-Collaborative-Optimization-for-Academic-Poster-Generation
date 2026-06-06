@@ -1,7 +1,9 @@
 # AMD ROCm 云 GPU 配置（禁用 4bit，fp16 LoRA）
-# 适用：MI250X / MI300 / 云端 AMD 实例（Linux + ROCm 6.x）
+# 先下载模型: python training/scripts/download_model.py --model qwen2.5-7b
+# 训练时: --model-path training/models/Qwen2.5-7B-Instruct
 task: refiner
 base_model: Qwen/Qwen2.5-7B-Instruct
+local_model_dir: models/Qwen2.5-7B-Instruct
 train_file: data/processed/refiner_train.jsonl
 val_file: data/processed/refiner_val.jsonl
 output_dir: outputs/refiner_lora_rocm

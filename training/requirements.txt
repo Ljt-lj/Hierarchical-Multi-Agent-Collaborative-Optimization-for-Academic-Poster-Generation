@@ -15,4 +15,4 @@ tqdm>=4.66.0
 pandas>=2.0.0
 scikit-learn>=1.4.0
 rouge-score>=0.1.2
-nltk>=3.8.0
+modelscope>=1.17.0
