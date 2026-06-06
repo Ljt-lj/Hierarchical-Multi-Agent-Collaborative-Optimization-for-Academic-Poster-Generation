@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -47,12 +48,33 @@ class Config:
     project_root: Path = PROJECT_ROOT
     output_dir: Path = OUTPUT_DIR
 
+    @staticmethod
+    def _read_api_key_file(key_file: Path) -> str:
+        raw = key_file.read_bytes()
+        for enc in ("utf-8-sig", "utf-8", "gbk"):
+            try:
+                text = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                text = ""
+        else:
+            text = raw.decode("utf-8", errors="ignore")
+        text = text.strip()
+        match = re.search(r"sk-[A-Za-z0-9_-]+", text)
+        if match:
+            return match.group(0)
+        # 纯 ASCII 单行 key
+        line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+        if line.isascii():
+            return line
+        return ""
+
     @classmethod
     def load(cls, api_key_path: Path | None = None) -> Config:
         cfg = cls()
         key_file = api_key_path or PROJECT_ROOT / "api_key.txt"
         if key_file.exists():
-            cfg.llm.api_key = key_file.read_text(encoding="utf-8").strip()
+            cfg.llm.api_key = cls._read_api_key_file(key_file)
         cfg.llm.api_key = cfg.llm.api_key or os.getenv("DEEPSEEK_API_KEY", "")
         cfg.output_dir.mkdir(parents=True, exist_ok=True)
         SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
