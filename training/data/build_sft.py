@@ -31,6 +31,51 @@ OUT_DIR = TRAIN_ROOT / "data" / "processed"
 REFINER_MIN_CHARS = 900
 VISUAL_MAX_CHARS = 700
 
+VISUAL_USER_MARKERS = (
+    "figure descriptor",
+    "describe the figure",
+    "describe this figure",
+    "describe the image",
+    "visual element",
+    "caption",
+    "chart",
+    "table",
+    "figure caption",
+    "image caption",
+)
+
+REFINER_USER_MARKERS = (
+    "section generator",
+    "content generator",
+    "poster section",
+    "poster content",
+    "compress",
+    "summarize",
+    "content tree",
+    "refine",
+    "bullet point",
+    "abstract",
+    "introduction",
+    "conclusion",
+    "methodology",
+    "experiment",
+    "document tree",
+)
+
+
+def _is_figure_description_task(user: str, assistant: str) -> bool:
+    u, a = user.lower(), assistant.lower()
+    if any(m in u for m in VISUAL_USER_MARKERS):
+        return True
+    if any(m in u for m in ("figure", "image", "visual", "caption")) and len(assistant) <= VISUAL_MAX_CHARS * 3:
+        return True
+    opening = a[:280]
+    if opening.startswith(("this figure", "the figure", "this image", "the image")):
+        return True
+    if "illustrates" in opening and ("figure" in opening or "image" in opening):
+        return True
+    return False
+
 
 def _extract_bullets(text: str, limit: int = 4) -> list[str]:
     bullets: list[str] = []
@@ -88,10 +133,10 @@ def _markdown_sections_to_json(text: str) -> dict | None:
     }
 
 
-def normalize_refiner_assistant(text: str) -> str | None:
+def normalize_refiner_assistant(text: str, user: str = "") -> str | None:
     """将 P2P Markdown 章节转为 RefinerAgent 期望的 JSON 标签."""
     text = text.strip()
-    if not text:
+    if not text or _is_figure_description_task(user, text):
         return None
 
     if text.startswith("{") or text.startswith("["):
@@ -112,7 +157,8 @@ def normalize_refiner_assistant(text: str) -> str | None:
         if tree:
             return json.dumps(tree, ensure_ascii=False)
 
-    if len(text) >= 200:
+    u = user.lower()
+    if len(text) >= REFINER_MIN_CHARS and any(m in u for m in REFINER_USER_MARKERS):
         return json.dumps(
             {
                 "title": "Poster",
@@ -148,6 +194,9 @@ def _classify_p2p_task(user_text: str, assistant_text: str) -> TaskType:
     if "evaluate" in u or "judge" in u or ("score" in u and "poster" in u):
         return TaskType.COMMENTER
 
+    if _is_figure_description_task(user_text, assistant_text):
+        return TaskType.VISUAL
+
     # Refiner 强信号：结构化内容树 / 长 Markdown 章节
     refiner_assistant_markers = (
         '"children"', '"bullets"', '"logic_links"', '"weight"',
@@ -158,25 +207,18 @@ def _classify_p2p_task(user_text: str, assistant_text: str) -> TaskType:
     if n >= REFINER_MIN_CHARS and ("##" in assistant_text or "###" in assistant_text):
         return TaskType.REFINER
 
-    refiner_user_markers = (
-        "section generator", "content generator", "poster section", "poster content",
-        "compress", "summarize", "content tree", "refine", "bullet point",
-        "abstract", "introduction", "conclusion", "methodology", "experiment",
-    )
+    refiner_user_markers = REFINER_USER_MARKERS
     if any(m in u for m in refiner_user_markers):
         return TaskType.REFINER
 
-    # 长回复默认为章节/内容生成（P2P 论文 ~3300 tokens）
-    if n >= 1800:
+    # 长回复默认为章节/内容生成（P2P 论文 ~3300 tokens），但排除图表描述
+    if n >= 1800 and not _is_figure_description_task(user_text, assistant_text):
         return TaskType.REFINER
-    if n >= REFINER_MIN_CHARS:
+    if n >= REFINER_MIN_CHARS and ("##" in assistant_text or "###" in assistant_text):
         return TaskType.REFINER
 
     # Visual 强信号：图表/图片描述（~192 tokens）
-    visual_user_markers = (
-        "figure descriptor", "describe the figure", "describe this figure",
-        "describe the image", "visual element", "caption", "chart", "table",
-    )
+    visual_user_markers = VISUAL_USER_MARKERS
     if any(m in u for m in visual_user_markers):
         return TaskType.VISUAL
     if n <= VISUAL_MAX_CHARS and any(m in u for m in ("figure", "image", "visual", "caption")):
@@ -236,7 +278,7 @@ def build_from_p2p_instruct(raw_path: Path) -> dict[str, list[SFTSample]]:
             }
             assistant_out = assistant[:12000]
             if task == TaskType.REFINER:
-                normalized = normalize_refiner_assistant(assistant)
+                normalized = normalize_refiner_assistant(assistant, user)
                 if normalized is None:
                     counts["skip_refiner_normalize"] += 1
                     continue
@@ -259,7 +301,7 @@ def build_from_p2p_instruct(raw_path: Path) -> dict[str, list[SFTSample]]:
 
 
 def ensure_refiner_bucket(buckets: dict[str, list[SFTSample]], min_ratio: float = 0.25) -> None:
-    """若 refiner 为空或过少，从 visual 长回复中划分."""
+    """若 refiner 过少，仅从 visual 中挑选可转为 JSON 章节的长样本."""
     refiner = buckets[TaskType.REFINER.value]
     visual = buckets[TaskType.VISUAL.value]
     total = len(refiner) + len(visual)
@@ -269,18 +311,34 @@ def ensure_refiner_bucket(buckets: dict[str, list[SFTSample]], min_ratio: float 
         return
 
     need = max(1, int(total * min_ratio) - len(refiner))
-    visual.sort(key=lambda s: len(s.messages[2].content), reverse=True)
-    move = visual[:need]
-    buckets[TaskType.VISUAL.value] = visual[need:]
-    for s in move:
+    candidates: list[SFTSample] = []
+    for s in visual:
+        user = s.messages[1].content
+        assistant = s.messages[2].content
+        if _is_figure_description_task(user, assistant):
+            continue
+        if "##" not in assistant and len(assistant) < REFINER_MIN_CHARS:
+            continue
+        normalized = normalize_refiner_assistant(assistant, user)
+        if not normalized:
+            continue
         s.task = TaskType.REFINER.value
         s.messages[0] = ChatMessage("system", REFINER_SYSTEM)
-        normalized = normalize_refiner_assistant(s.messages[2].content)
-        if normalized:
-            s.messages[2] = ChatMessage("assistant", normalized)
+        s.messages[2] = ChatMessage("assistant", normalized)
         s.meta["source"] = "p2p_instruct_refiner_fallback"
+        candidates.append(s)
+
+    candidates.sort(key=lambda s: len(s.messages[2].content), reverse=True)
+    move = candidates[:need]
+    moved_ids = {id(s) for s in move}
+    buckets[TaskType.VISUAL.value] = [s for s in visual if id(s) not in moved_ids]
     buckets[TaskType.REFINER.value].extend(move)
-    print(f"  [fallback] 从 visual 长回复补充 refiner +{len(move)} 条")
+    print(f"  [fallback] 从 visual 可转 JSON 章节样本补充 refiner +{len(move)} 条")
+    if len(refiner) + len(move) < total * min_ratio:
+        print(
+            "  [警告] refiner 仍偏少，建议: python training/data/download.py --max-rows 5000 "
+            "后重新 build_sft"
+        )
 
 
 def build_from_poster_sum(raw_path: Path) -> list[SFTSample]:
@@ -378,6 +436,20 @@ def main() -> int:
     stats_path = args.out_dir / "stats.json"
     stats_path.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"统计: {stats_path}")
+
+    refiner_val = args.out_dir / "refiner_val.jsonl"
+    if refiner_val.exists():
+        val_rows = refiner_val.read_text(encoding="utf-8").strip().splitlines()
+        json_gold = 0
+        for line in val_rows:
+            row = json.loads(line)
+            gold = row["messages"][2]["content"]
+            if gold.strip().startswith("{"):
+                json_gold += 1
+        print(f"refiner_val JSON 标签率: {json_gold}/{len(val_rows)}")
+        if val_rows and json_gold == 0:
+            print("[错误] refiner 验证集标签仍非 JSON，请确认已同步最新 build_sft.py")
+            return 1
 
     if not (args.out_dir / "refiner_train.jsonl").exists():
         print("\n[错误] 仍未生成 refiner_train.jsonl，请检查原始数据或增大 --max-rows")
