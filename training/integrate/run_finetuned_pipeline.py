@@ -30,14 +30,23 @@ def main() -> int:
         return 1
 
     config = Config.load()
+    if not config.llm.api_key:
+        print("[错误] 缺少 DeepSeek API Key。")
+        print("  Parser / Visual / Commenter 等 Agent 仍需要 API。")
+        print("  请在项目根目录创建 api_key.txt，或: export DEEPSEEK_API_KEY=sk-...")
+        return 1
+
     pipeline = PosterPipeline(config)
 
     refiner_llm = LocalLoRAClient(args.base_model, str(args.refiner_adapter))
     pipeline.refiner.llm = refiner_llm
-    pipeline.llm = refiner_llm
     if args.visual_adapter:
         visual_llm = LocalLoRAClient(args.base_model, str(args.visual_adapter))
         pipeline.visual.llm = visual_llm
+
+    print("Refiner: 本地 LoRA")
+    print(f"Visual: {'本地 LoRA' if args.visual_adapter else 'DeepSeek API'}")
+    print("Parser / Semantic / Commenter: DeepSeek API")
 
     pipeline.run(pdf_path=args.pdf, output_name=args.output_name)
     return 0
