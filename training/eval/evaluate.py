@@ -14,9 +14,7 @@ ROOT = TRAIN_ROOT.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from poster_agent.llm_client import _parse_json
-from poster_agent.models.trees import ContentNode
-from training.data.refiner_json import is_parseable_content_json
+from poster_agent.refiner_json import is_parseable_content_json, load_content_node_from_text
 from training.train.dataset import load_jsonl
 
 
@@ -30,7 +28,7 @@ def _parseable_json(text: str) -> bool:
 
 def _content_node_ok(text: str) -> bool:
     try:
-        ContentNode.from_dict(_parse_json(text))
+        load_content_node_from_text(text)
         return True
     except Exception:
         return False

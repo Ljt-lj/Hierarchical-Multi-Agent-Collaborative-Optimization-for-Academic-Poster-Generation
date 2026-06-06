@@ -40,7 +40,9 @@ class RefinerAgent:
 
         try:
             data = self.llm.chat_json(system, user)
-            node = ContentNode.from_dict(data)
+            from poster_agent.refiner_json import load_content_node_from_dict
+
+            node = load_content_node_from_dict(data)
         except Exception:
             node = _fallback_content_tree(raw_tree)
         self._apply_default_weights(node)
