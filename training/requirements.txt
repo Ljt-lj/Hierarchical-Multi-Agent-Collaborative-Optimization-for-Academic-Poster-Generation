@@ -1,0 +1,18 @@
+# 微调专用依赖（与主项目 requirements.txt 分开安装）
+datasets>=2.19.0
+huggingface_hub>=0.23.0
+transformers>=4.44.0
+accelerate>=0.33.0
+peft>=0.12.0
+trl>=0.9.6
+bitsandbytes>=0.43.0; platform_system != "Windows" and platform_machine != "aarch64"
+# AMD ROCm：不要安装 bitsandbytes，使用 configs/*_rocm.yaml
+torch>=2.2.0
+sentencepiece>=0.2.0
+protobuf>=4.25.0
+pyyaml>=6.0
+tqdm>=4.66.0
+pandas>=2.0.0
+scikit-learn>=1.4.0
+rouge-score>=0.1.2
+nltk>=3.8.0
