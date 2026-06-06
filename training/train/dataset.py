@@ -33,11 +33,13 @@ def build_hf_dataset(path: Path, tokenizer, max_samples: int | None = None) -> D
     if max_samples:
         rows = rows[:max_samples]
 
+    messages_list: list[list[dict[str, str]]] = []
     texts: list[str] = []
     for row in rows:
         messages = row.get("messages") or []
-        if len(messages) < 2:
+        if len(messages) < 3:
             continue
+        messages_list.append(messages)
         texts.append(format_chat(messages, tokenizer))
 
-    return Dataset.from_dict({"text": texts})
+    return Dataset.from_dict({"text": texts, "messages": messages_list})

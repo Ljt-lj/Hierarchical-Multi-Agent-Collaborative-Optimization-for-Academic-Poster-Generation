@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -29,6 +30,101 @@ OUT_DIR = TRAIN_ROOT / "data" / "processed"
 # P2PInstruct 两类样本长度差异（论文）：图表描述 ~192 token，章节生成 ~3300 token
 REFINER_MIN_CHARS = 900
 VISUAL_MAX_CHARS = 700
+
+
+def _extract_bullets(text: str, limit: int = 4) -> list[str]:
+    bullets: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("-", "•", "*")):
+            bullets.append(stripped.lstrip("-•* ").strip())
+        elif stripped and len(stripped) < 200 and stripped[0].isdigit() and "." in stripped[:4]:
+            bullets.append(stripped)
+    if bullets:
+        return bullets[:limit]
+    parts = [s.strip() for s in text.replace("\n", " ").split(". ") if len(s.strip()) > 10]
+    return parts[:limit] if parts else [text[:120]]
+
+
+def _markdown_sections_to_json(text: str) -> dict | None:
+    import re
+
+    sections = re.split(r"\n(?=##\s+)", text.strip())
+    if len(sections) <= 1 and not text.strip().startswith("##"):
+        return None
+
+    children: list[dict] = []
+    for sec in sections:
+        sec = sec.strip()
+        if not sec:
+            continue
+        match = re.match(r"##\s+(.+?)(?:\n|$)", sec)
+        if match:
+            title = match.group(1).strip()
+            body = sec[match.end() :].strip()
+        else:
+            title = "Section"
+            body = sec
+        bullets = _extract_bullets(body)
+        children.append(
+            {
+                "title": title,
+                "summary": body[:120],
+                "bullets": bullets[:4],
+                "weight": 0.5,
+                "logic_links": [],
+                "children": [],
+            }
+        )
+    if not children:
+        return None
+    return {
+        "title": children[0]["title"],
+        "summary": children[0]["summary"],
+        "bullets": children[0]["bullets"][:3],
+        "weight": 1.0,
+        "logic_links": [],
+        "children": children[1:] if len(children) > 1 else [],
+    }
+
+
+def normalize_refiner_assistant(text: str) -> str | None:
+    """将 P2P Markdown 章节转为 RefinerAgent 期望的 JSON 标签."""
+    text = text.strip()
+    if not text:
+        return None
+
+    if text.startswith("{") or text.startswith("["):
+        try:
+            obj = json.loads(text)
+            return json.dumps(obj, ensure_ascii=False)
+        except json.JSONDecodeError:
+            start, end = text.find("{"), text.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    obj = json.loads(text[start : end + 1])
+                    return json.dumps(obj, ensure_ascii=False)
+                except json.JSONDecodeError:
+                    pass
+
+    if "##" in text or re.search(r"^#+\s", text, re.MULTILINE):
+        tree = _markdown_sections_to_json(text)
+        if tree:
+            return json.dumps(tree, ensure_ascii=False)
+
+    if len(text) >= 200:
+        return json.dumps(
+            {
+                "title": "Poster",
+                "summary": text[:120],
+                "bullets": _extract_bullets(text)[:4],
+                "weight": 1.0,
+                "logic_links": [],
+                "children": [],
+            },
+            ensure_ascii=False,
+        )
+    return None
 
 
 def _write_jsonl(path: Path, samples: list[SFTSample]) -> None:
@@ -118,7 +214,7 @@ def build_from_p2p_instruct(raw_path: Path) -> dict[str, list[SFTSample]]:
         TaskType.COMMENTER.value: [],
         TaskType.ORCHESTRATOR.value: [],
     }
-    counts = {"total": 0, "skip_orchestrator": 0}
+    counts = {"total": 0, "skip_orchestrator": 0, "skip_refiner_normalize": 0}
     with raw_path.open(encoding="utf-8") as f:
         for line in f:
             row = json.loads(line)
@@ -138,17 +234,27 @@ def build_from_p2p_instruct(raw_path: Path) -> dict[str, list[SFTSample]]:
                 TaskType.VISUAL: VISUAL_SYSTEM,
                 TaskType.COMMENTER: COMMENTER_SYSTEM,
             }
+            assistant_out = assistant[:12000]
+            if task == TaskType.REFINER:
+                normalized = normalize_refiner_assistant(assistant)
+                if normalized is None:
+                    counts["skip_refiner_normalize"] += 1
+                    continue
+                assistant_out = normalized
             sample = SFTSample(
                 task=task.value,
                 messages=[
                     ChatMessage("system", system_map.get(task, REFINER_SYSTEM)),
                     ChatMessage("user", user[:12000]),
-                    ChatMessage("assistant", assistant[:12000]),
+                    ChatMessage("assistant", assistant_out),
                 ],
                 meta={"source": "p2p_instruct"},
             )
             buckets[task.value].append(sample)
-    print(f"  解析 {counts['total']} 条，跳过 orchestrator {counts['skip_orchestrator']} 条")
+    print(
+        f"  解析 {counts['total']} 条，跳过 orchestrator {counts['skip_orchestrator']} 条，"
+        f"跳过无法转 JSON 的 refiner {counts['skip_refiner_normalize']} 条"
+    )
     return buckets
 
 
@@ -169,6 +275,9 @@ def ensure_refiner_bucket(buckets: dict[str, list[SFTSample]], min_ratio: float 
     for s in move:
         s.task = TaskType.REFINER.value
         s.messages[0] = ChatMessage("system", REFINER_SYSTEM)
+        normalized = normalize_refiner_assistant(s.messages[2].content)
+        if normalized:
+            s.messages[2] = ChatMessage("assistant", normalized)
         s.meta["source"] = "p2p_instruct_refiner_fallback"
     buckets[TaskType.REFINER.value].extend(move)
     print(f"  [fallback] 从 visual 长回复补充 refiner +{len(move)} 条")

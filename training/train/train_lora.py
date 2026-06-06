@@ -75,7 +75,7 @@ def main() -> int:
         print("AMD 云 GPU 见 SHELL.md「AMD ROCm 云端」章节")
         return 1
 
-    from training.train.dataset import build_hf_dataset
+    from training.train.dataset import build_hf_dataset, format_chat
 
     is_rocm = bool(getattr(torch.version, "hip", None))
     use_4bit = bool(cfg.get("load_in_4bit", True)) and not is_rocm and platform.system() != "Windows"
@@ -146,17 +146,44 @@ def main() -> int:
     eval_ds = build_hf_dataset(val_file, tokenizer, max(64, (args.max_samples or 500) // 10))
 
     def tokenize(batch):
-        out = tokenizer(
-            batch["text"],
-            truncation=True,
-            max_length=int(cfg.get("max_seq_length", 4096)),
-            padding="max_length",
-        )
-        out["labels"] = [ids[:] for ids in out["input_ids"]]
-        return out
+        max_len = int(cfg.get("max_seq_length", 4096))
+        pad_id = tokenizer.pad_token_id
+        all_input_ids: list[list[int]] = []
+        all_labels: list[list[int]] = []
+        all_attention: list[list[int]] = []
 
-    train_ds = train_ds.map(tokenize, batched=True, remove_columns=["text"])
-    eval_ds = eval_ds.map(tokenize, batched=True, remove_columns=["text"])
+        for messages in batch["messages"]:
+            prompt = tokenizer.apply_chat_template(
+                messages[:-1], tokenize=False, add_generation_prompt=True
+            )
+            full_text = format_chat(messages, tokenizer)
+            prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+            encoded = tokenizer(
+                full_text,
+                truncation=True,
+                max_length=max_len,
+                padding="max_length",
+            )
+            labels = encoded["input_ids"][:]
+            prompt_len = min(len(prompt_ids), len(labels))
+            for j in range(prompt_len):
+                labels[j] = -100
+            for j, tid in enumerate(labels):
+                if tid == pad_id:
+                    labels[j] = -100
+
+            all_input_ids.append(encoded["input_ids"])
+            all_labels.append(labels)
+            all_attention.append(encoded["attention_mask"])
+
+        return {
+            "input_ids": all_input_ids,
+            "labels": all_labels,
+            "attention_mask": all_attention,
+        }
+
+    train_ds = train_ds.map(tokenize, batched=True, remove_columns=["text", "messages"])
+    eval_ds = eval_ds.map(tokenize, batched=True, remove_columns=["text", "messages"])
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
