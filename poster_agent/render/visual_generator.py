@@ -46,6 +46,7 @@ class VisualGenerator:
             "flow_diagram": self._flow_diagram,
             "architecture": self._architecture,
             "stat_cards": self._stat_cards,
+            "bullet_cards": self._bullet_cards,
             "figure": self._figure,
         }
         fn = generators.get(spec.type)
@@ -68,6 +69,8 @@ class VisualGenerator:
         ax.spines["right"].set_visible(False)
         ax.set_ylabel("Score", fontsize=10)
         ax.tick_params(labelsize=8)
+        max_val = max(float(v) for v in values) if values else 1
+        ax.set_ylim(0, max_val * 1.15 + 2)
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=18, ha="right")
         for bar, val in zip(bars, values):
             ax.text(
@@ -206,45 +209,162 @@ class VisualGenerator:
         return out
 
     def _architecture(self, spec: VisualSpec, name: str) -> Path:
-        steps = spec.data.get("steps", ["Input", "Process", "Output"])
-        return self._flow_diagram(
-            VisualSpec(type="flow_diagram", title=spec.title or "Architecture", data={"steps": steps}),
-            name,
-        )
+        layers = spec.data.get("layers") or []
+        if not layers:
+            steps = [format_body(str(s)) for s in (spec.data.get("steps") or [])]
+            layers = _steps_to_layers(steps)
+        if not layers or _layers_too_generic(layers):
+            layers = _steps_to_layers(
+                [format_body(str(s)) for s in (spec.data.get("steps") or ["Input", "Process", "Output"])]
+            )
 
-    def _stat_cards(self, spec: VisualSpec, name: str) -> Path:
-        cards = spec.data.get("cards", [
-            {"label": "Metric A", "value": "92", "unit": "%"},
-            {"label": "Metric B", "value": "4.5", "unit": "/5"},
-        ])
-        n = len(cards)
-        w, h = 540, 175
+        font_title = _load_font(14, bold=True)
+        font_name = _load_font(12, bold=True)
+        font_detail = _load_font(10)
+        w = 520
+        box_w = w - 28
+        inner_w = box_w - 20
+        y = 34
+        row_heights: list[int] = []
+        for layer in layers:
+            name_text = str(layer.get("name", "Block"))
+            detail = str(layer.get("detail", ""))
+            name_lines = _wrap_to_width(name_text, font_name, inner_w)[:1]
+            detail_lines = _wrap_to_width(detail, font_detail, inner_w)[:3]
+            row_h = 14 + len(name_lines) * 14 + len(detail_lines) * 12 + 10
+            row_heights.append(max(row_h, 44))
+            y += row_h + 10
+        h = y + 8
+
         img = Image.new("RGB", (w, h), (248, 250, 252))
         draw = ImageDraw.Draw(img)
-        font_val = _load_font(38, bold=True)
-        font_unit = _load_font(16)
-        font_lbl = _load_font(14)
-        pad = 16
-        card_w = (w - pad * (n + 1)) // n
+        tw = _text_w(smart_title(spec.title or "Architecture"), font_title)
+        draw.text(((w - tw) // 2, 8), smart_title(spec.title or "Architecture"), fill=(35, 45, 60), font=font_title)
 
-        for i, card in enumerate(cards):
-            x = pad + i * (card_w + pad)
-            y0, y1 = 24, h - 24
+        y = 34
+        for i, layer in enumerate(layers):
             color = _hex_to_rgb(PALETTE[i % len(PALETTE)])
-            _draw_shadow_box(draw, x, y0, card_w, y1 - y0, color, radius=CARD_RADIUS, fill=(255, 255, 255))
-            draw.rectangle([x, y0, x + card_w, y0 + 6], fill=color)
-            val = str(card.get("value", ""))[:8]
-            unit = str(card.get("unit", ""))[:6]
-            label = smart_title(str(card.get("label", "")))
-            label_lines = textwrap.wrap(label, width=max(8, card_w // 10))[:2]
-            draw.text((x + 10, y0 + 18), val, fill=color, font=font_val)
-            if unit:
-                vw = _text_w(val, font_val)
-                draw.text((x + 10 + vw + 2, y0 + 32), unit, fill=(110, 118, 130), font=font_unit)
-            ly = y1 - 28
-            for line in label_lines:
-                draw.text((x + 10, ly), line, fill=(60, 68, 80), font=font_lbl)
-                ly += 16
+            row_h = row_heights[i]
+            _draw_shadow_box(draw, 14, y, box_w, row_h, color, radius=FLOW_RADIUS)
+            draw.rectangle([14, y, 14 + 6, y + row_h], fill=color)
+            cy = y + 8
+            for line in _wrap_to_width(str(layer.get("name", "")), font_name, inner_w)[:1]:
+                draw.text((26, cy), line, fill=(30, 40, 55), font=font_name)
+                cy += 14
+            for line in _wrap_to_width(str(layer.get("detail", "")), font_detail, inner_w)[:3]:
+                draw.text((26, cy), line, fill=(70, 78, 92), font=font_detail)
+                cy += 12
+            if i < len(layers) - 1:
+                cx = w // 2
+                draw.line([(cx, y + row_h + 1), (cx, y + row_h + 9)], fill=(130, 140, 155), width=2)
+            y += row_h + 10
+
+        out = self.output_dir / f"{name}.png"
+        img.save(out)
+        return out
+
+    def _bullet_cards(self, spec: VisualSpec, name: str) -> Path:
+        """结论等区块：编号要点卡，文字换行不截断."""
+        items = spec.data.get("items") or spec.data.get("steps") or []
+        items = [format_body(str(x)) for x in items][:3]
+        if not items:
+            items = ["Takeaway"]
+
+        w = 540
+        n = len(items)
+        pad = 12
+        gap = 10
+        card_w = (w - pad * 2 - gap * (n - 1)) // n
+        card_w = max(card_w, 100)
+        font_idx = _load_font(18, bold=True)
+        font_txt = _load_font(10)
+        inner = card_w - 16
+        text_w = inner - 28
+
+        row_heights: list[int] = []
+        wrapped: list[list[str]] = []
+        for item in items:
+            lines = _wrap_to_width(item, font_txt, text_w)[:5]
+            wrapped.append(lines)
+            row_heights.append(max(72, 36 + len(lines) * 13))
+        card_h = max(row_heights)
+        h = card_h + 28
+
+        img = Image.new("RGB", (w, h), (248, 250, 252))
+        draw = ImageDraw.Draw(img)
+
+        for i, lines in enumerate(wrapped):
+            accent = _hex_to_rgb(PALETTE[i % len(PALETTE)])
+            x = pad + i * (card_w + gap)
+            y = 12
+            _draw_shadow_box(draw, x, y, card_w, card_h, accent, radius=CARD_RADIUS, fill=(255, 255, 255))
+            draw.ellipse([x + 8, y + 8, x + 28, y + 28], fill=accent)
+            idx = str(i + 1)
+            iw = _text_w(idx, font_idx)
+            draw.text((x + 18 - iw // 2, y + 10), idx, fill=(255, 255, 255), font=font_idx)
+            ty = y + 34
+            for line in lines:
+                draw.text((x + 8, ty), line, fill=(45, 50, 60), font=font_txt)
+                ty += 13
+
+        out = self.output_dir / f"{name}.png"
+        img.save(out)
+        return out
+
+    def _stat_cards(self, spec: VisualSpec, name: str) -> Path:
+        cards = _normalize_stat_cards(spec.data.get("cards", [
+            {"label": "Metric A", "value": "92", "unit": "%"},
+            {"label": "Metric B", "value": "4.5", "unit": "/5"},
+        ]))[:3]
+
+        w = 540
+        n = max(len(cards), 1)
+        pad = 14
+        gap = 12
+        card_w = (w - pad * 2 - gap * (n - 1)) // n
+        card_w = max(card_w, 100)
+
+        val_size = 28 if card_w >= 130 else 24 if card_w >= 110 else 20
+        lbl_size = 11 if card_w >= 110 else 10
+        font_val = _load_font(val_size, bold=True)
+        font_lbl = _load_font(lbl_size)
+        inner_pad = 10
+        text_w_max = card_w - inner_pad * 2
+
+        layouts: list[tuple[list[str], list[str], int]] = []
+        max_card_h = 120
+        for card in cards:
+            val = str(card.get("value", ""))
+            unit = str(card.get("unit", ""))
+            val_lines = _wrap_to_width(f"{val}{unit}".strip(), font_val, text_w_max)[:2]
+            label_lines = _wrap_to_width(str(card.get("label", "")), font_lbl, text_w_max)[:3]
+            val_block = len(val_lines) * (val_size + 4)
+            lbl_block = len(label_lines) * (lbl_size + 4)
+            card_h = inner_pad * 2 + val_block + 8 + lbl_block
+            max_card_h = max(max_card_h, card_h)
+            layouts.append((val_lines, label_lines, card_h))
+
+        h = max_card_h + 32
+        img = Image.new("RGB", (w, h), (248, 250, 252))
+        draw = ImageDraw.Draw(img)
+
+        for i, (card, (val_lines, label_lines, _)) in enumerate(zip(cards, layouts)):
+            accent = _hex_to_rgb(PALETTE[i % len(PALETTE)])
+            x = pad + i * (card_w + gap)
+            y = 16
+            _draw_shadow_box(draw, x, y, card_w, max_card_h, accent, radius=CARD_RADIUS, fill=(255, 255, 255))
+            draw.rectangle([x, y, x + card_w, y + 6], fill=accent)
+
+            vy = y + inner_pad + 4
+            for line in val_lines:
+                draw.text((x + inner_pad, vy), line, fill=accent, font=font_val)
+                vy += val_size + 4
+
+            line_h = lbl_size + 4
+            block_h = len(label_lines) * line_h
+            start_y = y + max_card_h - inner_pad - block_h
+            for j, line in enumerate(label_lines):
+                draw.text((x + inner_pad, start_y + j * line_h), line, fill=(60, 65, 75), font=font_lbl)
 
         out = self.output_dir / f"{name}.png"
         img.save(out)
@@ -337,8 +457,70 @@ def _hex_to_rgb(h: str) -> tuple[int, int, int]:
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 
 
+def _normalize_stat_cards(cards: list) -> list[dict]:
+    out: list[dict] = []
+    for i, card in enumerate(cards):
+        if isinstance(card, dict):
+            out.append(card)
+        elif isinstance(card, str):
+            out.append({"label": f"Item {i + 1}", "value": card, "unit": ""})
+    return out or [{"label": "Metric A", "value": "92", "unit": "%"}]
+
+
+def _steps_to_layers(steps: list[str]) -> list[dict[str, str]]:
+    default_names = ["Encoder", "Decoder", "Attention", "Feed-Forward"]
+    layers: list[dict[str, str]] = []
+    for i, step in enumerate(steps[:4]):
+        text = step.strip()
+        if ":" in text:
+            name, detail = text.split(":", 1)
+        elif "—" in text:
+            name, detail = text.split("—", 1)
+        elif "-" in text and len(text.split("-", 1)[0]) < 20:
+            name, detail = text.split("-", 1)
+        else:
+            name = default_names[i] if i < len(default_names) else f"Block {i + 1}"
+            detail = text
+        layers.append({"name": name.strip()[:28], "detail": detail.strip()[:90]})
+    return layers
+
+
+def _layers_too_generic(layers: list[dict[str, str]]) -> bool:
+    generic = {"input", "process", "output", "step 1", "step 2", "step 3"}
+    names = {str(l.get("name", "")).strip().lower() for l in layers}
+    return names.issubset(generic) or len(names) <= 1
+
+
 def _short_label(text: str, max_len: int) -> str:
-    return text if len(text) <= max_len else text[: max_len - 2] + ".."
+    return text if len(text) <= max_len else text[: max_len - 1] + "…"
+
+
+def _truncate_to_width(text: str, font, max_w: int) -> str:
+    if _text_w(text, font) <= max_w:
+        return text
+    ell = "…"
+    while text and _text_w(text + ell, font) > max_w:
+        text = text[:-1]
+    return (text + ell) if text else ell
+
+
+def _wrap_to_width(text: str, font, max_w: int) -> list[str]:
+    if max_w < 24:
+        return [_truncate_to_width(text, font, max_w)]
+    words = text.split()
+    if not words:
+        return [""]
+    lines: list[str] = []
+    cur = words[0]
+    for word in words[1:]:
+        trial = f"{cur} {word}"
+        if _text_w(trial, font) <= max_w:
+            cur = trial
+        else:
+            lines.append(_truncate_to_width(cur, font, max_w))
+            cur = word
+    lines.append(_truncate_to_width(cur, font, max_w))
+    return lines
 
 
 def _align_label_values(

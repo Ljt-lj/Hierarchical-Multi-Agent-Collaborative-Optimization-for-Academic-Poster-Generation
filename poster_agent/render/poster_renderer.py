@@ -8,7 +8,12 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from poster_agent.models.trees import PosterNode
-from poster_agent.render.image_fit import is_generated_visual, natural_fit_height, smart_fit_image
+from poster_agent.render.image_fit import (
+    figure_aspect_ratio,
+    is_generated_visual,
+    natural_fit_height,
+    smart_fit_image,
+)
 from poster_agent.render.text_layout import text_width, truncate_to_width, wrap_to_width
 from poster_agent.render.text_utils import format_body
 
@@ -84,32 +89,41 @@ class PosterRenderer:
         return out
 
     def _draw_header(self, draw: ImageDraw.ImageDraw) -> None:
-        h = 268
+        h = 280
         draw.rectangle([0, 0, self.CANVAS_W, h], fill=THEME["header_bg"])
         draw.rectangle([0, h - 4, self.CANVAS_W, h], fill=(55, 90, 150))
 
-        ft = _load_font(54, bold=True)
-        fa = _load_font(24)
+        title_size = 64
+        sub_size = 26
+        ft = _load_font(title_size, bold=True)
+        fa = _load_font(sub_size)
 
         title = self.paper_title
-        max_title_w = self.CANVAS_W - 160
+        max_title_w = self.CANVAS_W - 200
         title_lines = wrap_to_width(title, ft, max_title_w)
         if len(title_lines) > 2:
             title_lines = title_lines[:2]
             title_lines[-1] = truncate_to_width(title_lines[-1], ft, max_title_w)
-        y = 44
-        for line in title_lines:
-            tw = text_width(line, ft)
-            draw.text(((self.CANVAS_W - tw) // 2, y), line, fill=THEME["header_fg"], font=ft)
-            y += 60
 
         sub = self.authors or "Auto-generated Academic Poster | Multi-agent System"
         sub_lines = wrap_to_width(sub, fa, max_title_w)
         sub_line = sub_lines[0] if sub_lines else sub
         if len(sub_lines) > 1:
             sub_line = truncate_to_width(sub_line, fa, max_title_w)
+
+        title_line_h = title_size + 12
+        sub_line_h = sub_size + 10
+        block_h = len(title_lines) * title_line_h + 14 + sub_line_h
+        start_y = max(28, (h - block_h) // 2)
+
+        y = start_y
+        for line in title_lines:
+            tw = text_width(line, ft)
+            draw.text(((self.CANVAS_W - tw) // 2, y), line, fill=THEME["header_fg"], font=ft)
+            y += title_line_h
+
         sw = text_width(sub_line, fa)
-        draw.text(((self.CANVAS_W - sw) // 2, y + 6), sub_line, fill=THEME["header_sub"], font=fa)
+        draw.text(((self.CANVAS_W - sw) // 2, y + 10), sub_line, fill=THEME["header_sub"], font=fa)
 
         draw.rounded_rectangle([40, 40, 116, 116], radius=4, outline=(120, 150, 200), width=2)
         draw.text((58, 68), "LOGO", fill=THEME["header_sub"], font=_load_font(22))
@@ -180,14 +194,108 @@ class PosterRenderer:
 
         if mode == "figure_top" and figures:
             self._layout_figure_top(draw, img, node, content_box, figures, fb)
-        elif mode == "side_by_side" and figures:
-            self._layout_side_by_side(draw, img, node, content_box, figures, fb)
+        elif mode in ("figure_adaptive", "side_by_side") and figures:
+            self._layout_figure_adaptive(draw, img, node, content_box, figures, fb)
         elif mode == "figure_bottom" and figures:
             self._layout_figure_bottom(draw, img, node, content_box, figures, fb)
         elif mode == "text_dense":
             self._layout_text_dense(draw, node, content_box, fb)
         else:
             self._layout_text_only(draw, img, node, content_box, figures, fb)
+
+    def _layout_figure_adaptive(self, draw, img, node, box, figures, fb) -> None:
+        aspect = figure_aspect_ratio(figures[0])
+        if aspect >= 1.08:
+            self._layout_figure_top(draw, img, node, box, figures, fb)
+        else:
+            self._layout_text_wrap(draw, img, node, box, figures, fb, side="right")
+
+    def _layout_text_wrap(
+        self,
+        draw,
+        img,
+        node,
+        box,
+        figures,
+        fb,
+        *,
+        side: str = "right",
+    ) -> None:
+        """瘦高插图置侧，正文环绕（先并排、后通栏续排）."""
+        x0, y0, x1, y1 = box
+        w, h = x1 - x0, y1 - y0
+        gap = 12
+        fig_w = int(w * 0.40)
+        fig_h = min(
+            self._natural_figure_height(figures[0], fig_w),
+            int(h * 0.58),
+        )
+        fig_h = max(fig_h, int(w * 0.16))
+
+        if side == "right":
+            fig_x = x1 - fig_w
+            text_x = x0
+            text_w = max(fig_x - x0 - gap, int(w * 0.38))
+        else:
+            fig_x = x0
+            text_x = fig_x + fig_w + gap
+            text_w = max(x1 - text_x, int(w * 0.38))
+
+        fig_bottom = self._paste_figures(
+            img, figures, fig_x, y0, fig_w, fig_h, draw, fit_contain=True,
+        )
+        cy, next_bullet = self._draw_text_block(
+            draw,
+            node,
+            text_x,
+            y0,
+            text_w,
+            fig_h,
+            fb,
+            numbered=True,
+            bullet_start=0,
+            include_summary=True,
+            stop_between_bullets=True,
+        )
+        flow_y = max(fig_bottom, cy) + gap
+        remain_h = max(y1 - flow_y, 36)
+        if next_bullet < len(node.bullets):
+            self._draw_text_block(
+                draw,
+                node,
+                x0,
+                flow_y,
+                w,
+                remain_h,
+                fb,
+                numbered=True,
+                bullet_start=next_bullet,
+                include_summary=False,
+                distribute=True,
+            )
+        elif remain_h > 50:
+            self._draw_text_block(
+                draw,
+                node,
+                x0,
+                flow_y,
+                w,
+                remain_h,
+                fb,
+                numbered=True,
+                bullet_start=len(node.bullets),
+                include_summary=False,
+                distribute=True,
+            )
+
+    def _natural_figure_height(self, path: str, width: int) -> int:
+        try:
+            from PIL import Image
+            src = Image.open(path)
+            gen = is_generated_visual(path)
+            return natural_fit_height(src, width, is_generated=gen) + 16
+        except Exception:
+            return int(width * 0.28)
 
     def _layout_figure_top(self, draw, img, node, box, figures, fb) -> None:
         x0, y0, x1, y1 = box
@@ -201,25 +309,12 @@ class PosterRenderer:
             numbered=True, distribute=True,
         )
 
-    def _layout_side_by_side(self, draw, img, node, box, figures, fb) -> None:
-        x0, y0, x1, y1 = box
-        w, h = x1 - x0, y1 - y0
-        text_w = int(w * 0.48)
-        gap = 14
-        fig_x = x0 + text_w + gap
-        fig_w = x1 - fig_x
-        self._draw_text_block(
-            draw, node, x0, y0, text_w, h, fb,
-            numbered=True, distribute=True,
-        )
-        self._paste_figures(img, figures, fig_x, y0, fig_w, h, draw, fill=True)
-
     def _layout_figure_bottom(self, draw, img, node, box, figures, fb) -> None:
         x0, y0, x1, y1 = box
         w, total_h = x1 - x0, y1 - y0
         fig_h = self._figure_slot_height(figures, w, total_h, max_ratio=0.42)
         text_h = total_h - fig_h - 10
-        text_bottom = self._draw_text_block(
+        text_bottom, _ = self._draw_text_block(
             draw, node, x0, y0, w, text_h, fb,
             numbered=True, distribute=True,
         )
@@ -304,23 +399,28 @@ class PosterRenderer:
         numbered: bool = False,
         compact: bool = False,
         distribute: bool = False,
-    ) -> int:
-        lines: list[tuple[str, int]] = []
-        summary = format_body(node.summary)
+        bullet_start: int = 0,
+        include_summary: bool = True,
+        stop_between_bullets: bool = False,
+    ) -> tuple[int, int]:
+        lines: list[tuple[str, int, int | None]] = []
+        summary = format_body(node.summary) if include_summary else ""
         if summary:
             for line in wrap_to_width(summary, font, w):
-                lines.append((line, 0))
-            lines.append(("", 0))
+                lines.append((line, 0, None))
+            lines.append(("", 0, None))
 
         for i, bullet in enumerate(node.bullets):
+            if i < bullet_start:
+                continue
             text = format_body(bullet)
             prefix = f"{i + 1}. " if numbered else ""
             wrapped = wrap_to_width(prefix + text, font, w - 16)
             for j, line in enumerate(wrapped):
-                lines.append((line, 16 if j > 0 else 0))
+                lines.append((line, 16 if j > 0 else 0, i))
 
         if not lines:
-            return y
+            return y, bullet_start
 
         base_spacing = 6 if compact else LINE_SPACING
         line_h = font.size + base_spacing
@@ -333,15 +433,20 @@ class PosterRenderer:
 
         cy = y
         bottom = y + h
-        for line, indent in lines:
+        next_bullet = bullet_start
+        for line, indent, bullet_idx in lines:
             if not line:
                 cy += PARA_SPACING // 2
                 continue
             if cy + line_h > bottom:
+                if stop_between_bullets and bullet_idx is not None:
+                    return cy, bullet_idx
                 break
             draw.text((x + indent, cy), line, fill=THEME["body_text"], font=font)
             cy += line_h
-        return cy
+            if bullet_idx is not None:
+                next_bullet = bullet_idx + 1
+        return cy, next_bullet
 
     def _paste_figures(
         self,

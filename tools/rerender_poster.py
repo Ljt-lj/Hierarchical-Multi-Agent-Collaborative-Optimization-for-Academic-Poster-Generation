@@ -40,17 +40,18 @@ def main() -> int:
     if not raw_path.exists():
         raw_path = out_dir / args.content_json.name.replace("content", "raw").replace("_iter4.json", "_tree.json")
     raw_tree = None
+    lang = "en"
     if raw_path.exists():
         raw_tree = RawNode.from_dict(json.loads(raw_path.read_text(encoding="utf-8")))
         lang = detect_from_raw_tree(raw_tree)
         visual = VisualAgent(LLMClient(config.llm))
-        content = visual.enrich(content, raw_tree, language=lang)
+        content = visual.enrich(content, language=lang)
 
     layout = LayoutAgent(config.poster)
     poster = layout.layout(content)
 
     painter = PainterAgent(out_dir)
-    painter.prepare_visuals(content, args.prefix)
+    painter.prepare_visuals(content, args.prefix, llm=LLMClient(config.llm), language=lang)
     painter.attach_visuals_to_poster(poster, content)
 
     title = content.title or "Poster"

@@ -99,7 +99,7 @@ def prepare_paper(
     arxiv_id = spec["arxiv_id"]
     try:
         meta = fetch_arxiv_metadata(arxiv_id)
-    except (urllib.error.URLError, TimeoutError) as e:
+    except (urllib.error.URLError, TimeoutError, urllib.error.HTTPError) as e:
         console.print(f"[yellow]元数据获取失败 {arxiv_id}: {e}，使用备用标题")
         meta = {
             "arxiv_id": arxiv_id,
@@ -178,6 +178,20 @@ def run_poster_for_paper(
     return record
 
 
+def _find_cached_pdf(papers_dir: Path, arxiv_id: str, slug: str) -> Path | None:
+    candidates = [
+        papers_dir / slug / f"{arxiv_id}.pdf",
+        papers_dir / f"{arxiv_id}.pdf",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    if papers_dir.exists():
+        for path in papers_dir.rglob(f"{arxiv_id}.pdf"):
+            return path
+    return None
+
+
 def run_test(
     *,
     count: int = 5,
@@ -215,12 +229,20 @@ def run_test(
                 console.print(f"[red]FAIL[/red] {spec['arxiv_id']}: {e}")
     else:
         for spec in specs:
-            meta = fetch_arxiv_metadata(spec["arxiv_id"])
+            try:
+                meta = fetch_arxiv_metadata(spec["arxiv_id"])
+            except (urllib.error.URLError, TimeoutError, urllib.error.HTTPError) as e:
+                console.print(f"[yellow]元数据获取失败 {spec['arxiv_id']}: {e}，使用备用标题")
+                meta = {
+                    "arxiv_id": spec["arxiv_id"],
+                    "title": spec.get("fallback_title", spec["arxiv_id"]),
+                    "authors": [],
+                }
             title = meta["title"] or spec.get("fallback_title", spec["arxiv_id"])
             slug = slugify(title)
-            pdf_path = papers_dir / slug / f"{spec['arxiv_id']}.pdf"
-            if not pdf_path.exists():
-                console.print(f"[red]缺少 PDF: {pdf_path}，请先运行不带 --skip-download")
+            pdf_path = _find_cached_pdf(papers_dir, spec["arxiv_id"], slug)
+            if pdf_path is None:
+                console.print(f"[red]缺少 PDF: {papers_dir / slug / spec['arxiv_id']}.pdf，请先运行不带 --skip-download")
                 continue
             papers.append({**meta, "title": title, "slug": slug, "pdf_path": str(pdf_path)})
 

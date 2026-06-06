@@ -52,6 +52,20 @@ def natural_fit_height(img: Image.Image, target_width: int, *, is_generated: boo
     return max(1, int(sh * target_width / sw))
 
 
+def figure_aspect_ratio(path: str) -> float:
+    """读取插图宽高比（宽/高）."""
+    try:
+        img = Image.open(path)
+        if is_generated_visual(path):
+            img = trim_content_margins(img.convert("RGB"))
+        else:
+            img = img.convert("RGB")
+        w, h = img.size
+        return w / max(h, 1)
+    except Exception:
+        return 1.4
+
+
 def smart_fit_image(img: Image.Image, tw: int, th: int, *, is_generated: bool = False) -> Image.Image:
     sw, sh = img.size
     if sw <= 0 or sh <= 0 or tw <= 0 or th <= 0:

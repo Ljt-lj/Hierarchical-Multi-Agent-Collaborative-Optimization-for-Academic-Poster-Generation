@@ -96,8 +96,13 @@ class PosterPipeline:
             self._save_json(content_tree.to_dict(), f"{output_name}_content_iter{iteration}.json")
 
             console.print("  → 可视化智能体")
-            content_tree = self.visual.enrich(content_tree, raw_tree, language=paper_lang)
-            self.painter.prepare_visuals(content_tree, f"{output_name}_iter{iteration}")
+            content_tree = self.visual.enrich(content_tree, language=paper_lang)
+            self.painter.prepare_visuals(
+                content_tree,
+                f"{output_name}_iter{iteration}",
+                llm=self.llm,
+                language=paper_lang,
+            )
 
             console.print("  → 语义检查智能体")
             logic_score, logic_issues = self.semantic.check(content_tree, language=paper_lang)

@@ -63,14 +63,15 @@ class GridLayoutEngine:
         available_h = content_bottom - body_start_y
 
         plans = [_plan_section(s, col_w) for s in body_sections]
-        total_est = sum(p.estimated_h for p in plans) + BLOCK_GAP * (len(plans) // num_cols)
+        weights = [_section_layout_weight(s) for s in body_sections]
+        total_est = sum(p.estimated_h * w for p, w in zip(plans, weights)) + BLOCK_GAP * (len(plans) // num_cols)
         scale = min(1.0, available_h / max(total_est, 1))
 
         col_heights = [body_start_y] * num_cols
         placed: list[tuple[PosterNode, int]] = []
 
-        for plan, section in zip(plans, body_sections):
-            h = max(int(plan.estimated_h * scale), _min_section_height(plan))
+        for plan, section, weight in zip(plans, body_sections, weights):
+            h = max(int(plan.estimated_h * weight * scale), _min_section_height(plan))
             col = min(range(num_cols), key=lambda i: col_heights[i])
             x = content_x + col * (col_w + BLOCK_GAP)
             y = col_heights[col]
@@ -86,7 +87,7 @@ class GridLayoutEngine:
             col_heights[col] = y + h + BLOCK_GAP
 
         _resolve_overlaps(placed, content_bottom)
-        _stretch_column_tails(placed, content_bottom)
+        _stretch_column_tails(placed, content_bottom, body_sections)
 
         return _wrap_root(content, children, content_x, content_y, content_w, content_bottom - content_y)
 
@@ -169,12 +170,14 @@ def _choose_layout(node: ContentNode) -> str:
     has_fig = bool(node.image_paths or node.visuals)
     if not has_fig:
         return "text_dense" if _is_reference(t) else "text_only"
+    if "conclusion" in t or "结论" in t:
+        return "figure_top"
     if _is_result(t) or _is_experiment(t):
         return "figure_top"
-    if _is_method(t):
-        return "side_by_side"
     if _is_intro(t):
-        return "side_by_side"
+        return "figure_top"
+    if _is_method(t):
+        return "figure_bottom"
     return "figure_bottom"
 
 
@@ -182,6 +185,8 @@ def _text_height(node: ContentNode, col_w: int, layout: str, body_font: int) -> 
     chars_per_line = max(col_w // max(body_font // 2 + 4, 10), 16)
     if layout == "side_by_side":
         chars_per_line = max(col_w // max(body_font + 8, 20), 14)
+    elif layout == "figure_adaptive":
+        chars_per_line = max(col_w // max(body_font // 2 + 4, 10), 16)
     lines = 0
     if node.summary:
         lines += max(1, len(node.summary) // chars_per_line + 1)
@@ -194,12 +199,18 @@ def _text_height(node: ContentNode, col_w: int, layout: str, body_font: int) -> 
 def _figure_height(node: ContentNode, col_w: int, layout: str) -> int:
     if not (node.image_paths or node.visuals):
         return 0
+    t = node.title.lower()
     if layout == "figure_top":
         n_figs = min(len(node.image_paths or []) + len(node.visuals or []), 2)
-        base = int(col_w * (0.38 if n_figs >= 2 else 0.32))
+        ratio = 0.34 if "conclusion" in t or "结论" in t else 0.30
+        if _is_intro(t):
+            ratio = 0.24
+        base = int(col_w * (ratio if n_figs >= 1 else 0.28))
         return base
     if layout == "side_by_side":
         return int(col_w * 0.42)
+    if layout == "figure_adaptive":
+        return int(col_w * 0.32)
     if layout == "figure_bottom":
         return int(col_w * 0.30)
     return 0
@@ -221,11 +232,17 @@ def _resolve_overlaps(placed: list[tuple[PosterNode, int]], content_bottom: int)
                 curr.rect = LayoutRect(curr.rect.x, curr.rect.y, curr.rect.width, max(allowed_h, _min_height(curr)))
 
 
-def _stretch_column_tails(placed: list[tuple[PosterNode, int]], content_bottom: int) -> None:
-    """将列底剩余空间均分到各区块高度，由渲染器通过正文行距填充."""
+def _stretch_column_tails(
+    placed: list[tuple[PosterNode, int]],
+    content_bottom: int,
+    sections: list[ContentNode],
+) -> None:
+    """按区块权重分配列底剩余空间，结论/实验多分配，引言少分配."""
     by_col: dict[int, list[PosterNode]] = {}
     for node, col in placed:
         by_col.setdefault(col, []).append(node)
+
+    title_map = {s.title: s for s in sections}
 
     for nodes in by_col.values():
         nodes.sort(key=lambda n: n.rect.y)
@@ -233,12 +250,11 @@ def _stretch_column_tails(placed: list[tuple[PosterNode, int]], content_bottom: 
         slack = content_bottom - (last.rect.y + last.rect.height)
         if slack <= BLOCK_GAP:
             continue
-        n = len(nodes)
-        per = slack // n
-        rem = slack % n
+        weights = [_section_stretch_weight(title_map.get(n.title, None)) for n in nodes]
+        total_w = sum(weights) or len(nodes)
         shift = 0
         for i, node in enumerate(nodes):
-            extra = per + (1 if i < rem else 0)
+            extra = int(slack * weights[i] / total_w)
             node.rect = LayoutRect(
                 node.rect.x,
                 node.rect.y + shift,
@@ -246,6 +262,38 @@ def _stretch_column_tails(placed: list[tuple[PosterNode, int]], content_bottom: 
                 node.rect.height + extra,
             )
             shift += extra
+
+
+def _section_layout_weight(node: ContentNode) -> float:
+    t = node.title.lower()
+    if _is_intro(t):
+        return 0.78
+    if "conclusion" in t or "结论" in t:
+        return 1.28
+    if _is_experiment(t):
+        return 1.08
+    if _is_method(t):
+        return 0.95
+    if "background" in t or "背景" in t:
+        return 0.92
+    return 1.0
+
+
+def _section_stretch_weight(node: ContentNode | None) -> float:
+    if node is None:
+        return 1.0
+    t = node.title.lower()
+    if _is_intro(t):
+        return 0.25
+    if "conclusion" in t or "结论" in t:
+        return 2.2
+    if _is_experiment(t):
+        return 1.15
+    if _is_method(t):
+        return 0.75
+    if "background" in t or "背景" in t:
+        return 0.85
+    return 1.0
 
 
 def _min_height(node: PosterNode) -> int:
