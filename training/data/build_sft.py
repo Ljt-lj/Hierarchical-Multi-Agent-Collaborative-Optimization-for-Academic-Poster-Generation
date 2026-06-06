@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import re
 import sys
 from pathlib import Path
 
@@ -36,102 +35,21 @@ from training.data.p2p_classify import (
     is_refiner_content,
     messages_to_pair,
 )
-
-
-def _extract_bullets(text: str, limit: int = 4) -> list[str]:
-    bullets: list[str] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(("-", "•", "*")):
-            bullets.append(stripped.lstrip("-•* ").strip())
-        elif stripped and len(stripped) < 200 and stripped[0].isdigit() and "." in stripped[:4]:
-            bullets.append(stripped)
-    if bullets:
-        return bullets[:limit]
-    parts = [s.strip() for s in text.replace("\n", " ").split(". ") if len(s.strip()) > 10]
-    return parts[:limit] if parts else [text[:120]]
-
-
-def _markdown_sections_to_json(text: str) -> dict | None:
-    import re
-
-    sections = re.split(r"\n(?=##\s+)", text.strip())
-    if len(sections) <= 1 and not text.strip().startswith("##"):
-        return None
-
-    children: list[dict] = []
-    for sec in sections:
-        sec = sec.strip()
-        if not sec:
-            continue
-        match = re.match(r"##\s+(.+?)(?:\n|$)", sec)
-        if match:
-            title = match.group(1).strip()
-            body = sec[match.end() :].strip()
-        else:
-            title = "Section"
-            body = sec
-        bullets = _extract_bullets(body)
-        children.append(
-            {
-                "title": title,
-                "summary": body[:120],
-                "bullets": bullets[:4],
-                "weight": 0.5,
-                "logic_links": [],
-                "children": [],
-            }
-        )
-    if not children:
-        return None
-    return {
-        "title": children[0]["title"],
-        "summary": children[0]["summary"],
-        "bullets": children[0]["bullets"][:3],
-        "weight": 1.0,
-        "logic_links": [],
-        "children": children[1:] if len(children) > 1 else [],
-    }
+from training.data.refiner_json import is_parseable_content_json, normalize_refiner_json
 
 
 def normalize_refiner_assistant(text: str, user: str = "") -> str | None:
-    """将 P2P Markdown 章节转为 RefinerAgent 期望的 JSON 标签."""
-    text = text.strip()
-    if not text or is_figure_description_task(user, text):
+    if not text.strip() or is_figure_description_task(user, text):
         return None
-
-    if text.startswith("{") or text.startswith("["):
-        try:
-            obj = json.loads(text)
-            return json.dumps(obj, ensure_ascii=False)
-        except json.JSONDecodeError:
-            start, end = text.find("{"), text.rfind("}")
-            if start >= 0 and end > start:
-                try:
-                    obj = json.loads(text[start : end + 1])
-                    return json.dumps(obj, ensure_ascii=False)
-                except json.JSONDecodeError:
-                    pass
-
-    if "##" in text or re.search(r"^#+\s", text, re.MULTILINE):
-        tree = _markdown_sections_to_json(text)
-        if tree:
-            return json.dumps(tree, ensure_ascii=False)
-
     u = user.lower()
-    if len(text) >= REFINER_MIN_CHARS and any(m in u for m in REFINER_USER_MARKERS):
-        return json.dumps(
-            {
-                "title": "Poster",
-                "summary": text[:120],
-                "bullets": _extract_bullets(text)[:4],
-                "weight": 1.0,
-                "logic_links": [],
-                "children": [],
-            },
-            ensure_ascii=False,
-        )
-    return None
+    if not (
+        "##" in text
+        or text.strip().startswith("{")
+        or len(text) >= REFINER_MIN_CHARS
+        or any(m in u for m in REFINER_USER_MARKERS)
+    ):
+        return None
+    return normalize_refiner_json(text, user)
 
 
 def _write_jsonl(path: Path, samples: list[SFTSample]) -> None:
@@ -437,14 +355,14 @@ def main() -> int:
         return 1
 
     val_rows = refiner_val.read_text(encoding="utf-8").strip().splitlines()
-    json_gold = sum(
+    parseable_gold = sum(
         1
         for line in val_rows
-        if json.loads(line)["messages"][2]["content"].strip().startswith("{")
+        if is_parseable_content_json(json.loads(line)["messages"][2]["content"])
     )
-    print(f"refiner_val JSON 标签率: {json_gold}/{len(val_rows)}")
-    if json_gold < len(val_rows):
-        print("[错误] refiner 验证集存在非 JSON 标签")
+    print(f"refiner_val 可解析 ContentNode 率: {parseable_gold}/{len(val_rows)}")
+    if parseable_gold < len(val_rows):
+        print("[错误] refiner 验证集存在不可解析 JSON，请重新 build_sft（需最新 refiner_json.py）")
         return 1
 
     if not (args.out_dir / "refiner_train.jsonl").exists():

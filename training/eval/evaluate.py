@@ -15,6 +15,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from poster_agent.llm_client import _parse_json
+from poster_agent.models.trees import ContentNode
+from training.data.refiner_json import is_parseable_content_json
 from training.train.dataset import load_jsonl
 
 
@@ -23,10 +25,14 @@ def _strict_json(text: str) -> bool:
 
 
 def _parseable_json(text: str) -> bool:
+    return is_parseable_content_json(text)
+
+
+def _content_node_ok(text: str) -> bool:
     try:
-        _parse_json(text)
+        ContentNode.from_dict(_parse_json(text))
         return True
-    except (json.JSONDecodeError, ValueError):
+    except Exception:
         return False
 
 
@@ -58,7 +64,7 @@ def main() -> int:
     parser.add_argument("--val-file", type=Path, default=TRAIN_ROOT / "data/processed/refiner_val.jsonl")
     parser.add_argument("--base-model", default="Qwen/Qwen2.5-7B-Instruct")
     parser.add_argument("--max-samples", type=int, default=50)
-    parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument("--max-new-tokens", type=int, default=4096)
     args = parser.parse_args()
 
     if not args.val_file.exists():
@@ -93,8 +99,10 @@ def main() -> int:
                 "idx": i,
                 "strict_json": _strict_json(pred),
                 "parseable_json": _parseable_json(pred),
+                "content_node_ok": _content_node_ok(pred),
                 "gold_strict_json": _strict_json(gold),
                 "gold_parseable_json": _parseable_json(gold),
+                "gold_content_node_ok": _content_node_ok(gold),
                 "pred_len": len(pred),
                 "gold_len": len(gold),
                 "pred_preview": pred[:400],
@@ -107,11 +115,13 @@ def main() -> int:
         "samples": len(results),
         "strict_json_rate": sum(1 for r in results if r["strict_json"]) / n,
         "parseable_json_rate": sum(1 for r in results if r["parseable_json"]) / n,
+        "content_node_rate": sum(1 for r in results if r["content_node_ok"]) / n,
         "gold_strict_json_rate": sum(1 for r in results if r["gold_strict_json"]) / n,
         "gold_parseable_json_rate": sum(1 for r in results if r["gold_parseable_json"]) / n,
+        "gold_content_node_rate": sum(1 for r in results if r["gold_content_node_ok"]) / n,
         "note": (
-            "strict_json=输出以{开头; parseable_json=与 pipeline 相同解析逻辑可解析。"
-            "若 gold_strict_json_rate 也很低，说明验证集标签本身是 Markdown，需重建数据后重训。"
+            "parseable_json / content_node_rate 需与 pipeline 一致才算可用。"
+            "若 gold_parseable_json_rate=0，说明训练标签格式有问题，需 git pull 后重新 build_sft + 训练。"
         ),
         "details": results[:10],
     }
