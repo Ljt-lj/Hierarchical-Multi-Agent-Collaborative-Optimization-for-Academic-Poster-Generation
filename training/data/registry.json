@@ -1,0 +1,57 @@
+{
+  "datasets": [
+    {
+      "id": "p2p_instruct",
+      "name": "P2PInstruct",
+      "hf_id": "ASC8384/P2PInstruct",
+      "url": "https://huggingface.co/datasets/ASC8384/P2PInstruct",
+      "split": "train",
+      "size": 30460,
+      "license": "research",
+      "tasks": ["refiner", "visual", "orchestrator"],
+      "description": "P2P 论文官方指令微调集：30k+ paper→poster 全流程 instruction-response，含章节生成与图表描述"
+    },
+    {
+      "id": "p2p_eval",
+      "name": "P2PEval",
+      "hf_id": "ASC8384/P2PEval",
+      "url": "https://huggingface.co/datasets/ASC8384/P2PEval",
+      "split": "train",
+      "size": 877,
+      "license": "research",
+      "tasks": ["evaluation"],
+      "description": "121 组 paper-poster 配对基准，用于微调后评测"
+    },
+    {
+      "id": "poster_sum",
+      "name": "PosterSum",
+      "hf_id": "rohitsaxena/PosterSum",
+      "url": "https://huggingface.co/datasets/rohitsaxena/PosterSum",
+      "splits": ["train", "validation", "test"],
+      "size": 16305,
+      "license": "research",
+      "tasks": ["refiner_augment"],
+      "description": "16k 海报图像 + 论文摘要，可用于摘要↔海报内容对齐增强"
+    }
+  ],
+  "recommended_base_models": [
+    {
+      "id": "qwen2.5-7b",
+      "hf_id": "Qwen/Qwen2.5-7B-Instruct",
+      "vram_gb": 16,
+      "note": "中英文均衡，推荐 LoRA 微调 Refiner/Visual"
+    },
+    {
+      "id": "qwen2.5-1.5b",
+      "hf_id": "Qwen/Qwen2.5-1.5B-Instruct",
+      "vram_gb": 6,
+      "note": "低显存快速实验"
+    },
+    {
+      "id": "llama3.2-3b",
+      "hf_id": "meta-llama/Llama-3.2-3B-Instruct",
+      "vram_gb": 8,
+      "note": "英文为主"
+    }
+  ]
+}
