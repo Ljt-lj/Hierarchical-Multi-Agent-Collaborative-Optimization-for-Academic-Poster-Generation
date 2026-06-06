@@ -85,9 +85,13 @@ pip install -r requirements.txt
 pip install -r training/requirements.txt
 pip uninstall bitsandbytes -y    # AMD 必须去掉
 
-# 1) 数据
-python training/data/download.py --max-rows 500    # 试跑；全量去掉 --max-rows
-python training/data/build_sft.py
+# 1) 数据（训练最小集：只需 P2PInstruct；P2PEval/PosterSum 可选）
+python training/data/download.py --dataset train_minimal --max-rows 500
+
+# 或分别下载（P2PEval 失败不影响训练）
+python training/data/download.py --dataset p2p_instruct --max-rows 500
+python training/data/download.py --dataset p2p_eval          # 评测用，可稍后重试
+python training/data/download.py --dataset poster_sum          # 增强用，可稍后重试
 
 # 2) 训练 Refiner（AMD 专用配置，fp16 LoRA，无 4bit）
 python training/train/train_lora.py --config training/configs/train_refiner_rocm.yaml
