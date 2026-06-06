@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import platform
 import sys
 from pathlib import Path
@@ -24,6 +25,16 @@ def load_config(path: Path) -> dict:
 def resolve_path(base: Path, p: str) -> Path:
     path = Path(p)
     return path if path.is_absolute() else base / path
+
+
+def build_trainer(trainer_cls, tokenizer, **kwargs):
+    """兼容 transformers v4 (tokenizer) 与 v5+ (processing_class)。"""
+    sig = inspect.signature(trainer_cls.__init__)
+    if "processing_class" in sig.parameters:
+        kwargs["processing_class"] = tokenizer
+    else:
+        kwargs["tokenizer"] = tokenizer
+    return trainer_cls(**kwargs)
 
 
 def main() -> int:
@@ -104,14 +115,19 @@ def main() -> int:
             bnb_4bit_use_double_quant=True,
         )
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
+    load_kwargs = dict(
         quantization_config=quant_config,
-        torch_dtype=torch.bfloat16 if cfg.get("bf16") else torch.float16,
         device_map="auto",
         trust_remote_code=True,
         local_files_only=local_only,
     )
+    dtype = torch.bfloat16 if cfg.get("bf16") else torch.float16
+    try:
+        model = AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype, **load_kwargs)
+    except TypeError:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, torch_dtype=dtype, **load_kwargs
+        )
     if use_4bit:
         model = prepare_model_for_kbit_training(model)
 
@@ -143,14 +159,15 @@ def main() -> int:
     eval_ds = eval_ds.map(tokenize, batched=True, remove_columns=["text"])
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    training_args = TrainingArguments(
+
+    ta_sig = inspect.signature(TrainingArguments.__init__)
+    ta_kwargs = dict(
         output_dir=str(output_dir),
         num_train_epochs=float(cfg.get("num_train_epochs", 3)),
         per_device_train_batch_size=int(cfg.get("per_device_train_batch_size", 2)),
         per_device_eval_batch_size=int(cfg.get("per_device_eval_batch_size", 2)),
         gradient_accumulation_steps=int(cfg.get("gradient_accumulation_steps", 8)),
         learning_rate=float(cfg.get("learning_rate", 2e-4)),
-        warmup_ratio=float(cfg.get("warmup_ratio", 0.03)),
         logging_steps=int(cfg.get("logging_steps", 10)),
         eval_strategy="steps",
         eval_steps=int(cfg.get("eval_steps", 200)),
@@ -162,13 +179,27 @@ def main() -> int:
         seed=int(cfg.get("seed", 42)),
         remove_unused_columns=False,
     )
+    if cfg.get("warmup_steps") is not None:
+        ta_kwargs["warmup_steps"] = int(cfg["warmup_steps"])
+    elif "warmup_ratio" in ta_sig.parameters:
+        ta_kwargs["warmup_ratio"] = float(cfg.get("warmup_ratio", 0.03))
+    else:
+        bs = int(cfg.get("per_device_train_batch_size", 2))
+        gas = int(cfg.get("gradient_accumulation_steps", 8))
+        epochs = float(cfg.get("num_train_epochs", 3))
+        steps_per_epoch = max(1, len(train_ds) // (bs * gas))
+        total_steps = int(steps_per_epoch * epochs)
+        ta_kwargs["warmup_steps"] = max(1, int(total_steps * float(cfg.get("warmup_ratio", 0.03))))
 
-    trainer = Trainer(
+    training_args = TrainingArguments(**ta_kwargs)
+
+    trainer = build_trainer(
+        Trainer,
+        tokenizer,
         model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
-        tokenizer=tokenizer,
     )
     trainer.train()
     trainer.save_model(str(output_dir / "final"))
