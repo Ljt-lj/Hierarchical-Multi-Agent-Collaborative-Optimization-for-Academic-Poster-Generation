@@ -14,7 +14,11 @@ ROOT = TRAIN_ROOT.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from poster_agent.refiner_json import is_parseable_content_json, load_content_node_from_text
+from poster_agent.refiner_json import (
+    is_parseable_content_json,
+    load_content_node_from_text,
+    parse_error,
+)
 from training.train.dataset import load_jsonl
 
 
@@ -63,6 +67,11 @@ def main() -> int:
     parser.add_argument("--base-model", default="Qwen/Qwen2.5-7B-Instruct")
     parser.add_argument("--max-samples", type=int, default=50)
     parser.add_argument("--max-new-tokens", type=int, default=4096)
+    parser.add_argument(
+        "--labels-only",
+        action="store_true",
+        help="只检查验证集 gold 标签，不加载模型",
+    )
     args = parser.parse_args()
 
     if not args.val_file.exists():
@@ -70,6 +79,35 @@ def main() -> int:
         return 1
 
     rows = load_jsonl(args.val_file)[: args.max_samples]
+
+    if args.labels_only:
+        results = []
+        for i, row in enumerate(rows):
+            messages = row.get("messages", [])
+            if len(messages) < 3:
+                continue
+            gold = messages[2]["content"]
+            results.append(
+                {
+                    "idx": i,
+                    "gold_strict_json": _strict_json(gold),
+                    "gold_parseable_json": _parseable_json(gold),
+                    "gold_parse_error": parse_error(gold),
+                    "gold_len": len(gold),
+                    "gold_preview": gold[:400],
+                }
+            )
+        n = max(len(results), 1)
+        report = {
+            "samples": len(results),
+            "gold_strict_json_rate": sum(1 for r in results if r["gold_strict_json"]) / n,
+            "gold_parseable_json_rate": sum(1 for r in results if r["gold_parseable_json"]) / n,
+            "note": "labels-only 模式：仅检查验证集 gold 是否可被 pipeline 解析",
+            "details": results[:10],
+        }
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report["gold_parseable_json_rate"] == 1.0 else 1
+
     tokenizer, model = _load_model(args.base_model, args.adapter)
 
     gen_sig = inspect.signature(model.generate)
@@ -101,6 +139,8 @@ def main() -> int:
                 "gold_strict_json": _strict_json(gold),
                 "gold_parseable_json": _parseable_json(gold),
                 "gold_content_node_ok": _content_node_ok(gold),
+                "gold_parse_error": parse_error(gold),
+                "pred_parse_error": parse_error(pred),
                 "pred_len": len(pred),
                 "gold_len": len(gold),
                 "pred_preview": pred[:400],

@@ -206,13 +206,36 @@ def normalize_refiner_json(text: str, user: str = "") -> str | None:
     return json.dumps(tree, ensure_ascii=False)
 
 
-def load_content_node_from_text(text: str) -> ContentNode:
+def load_content_node_from_text(text: str, *, allow_repair: bool = True) -> ContentNode:
     obj = try_parse_json_obj(text)
     if obj is None:
-        obj = _parse_json(text)
-    if not isinstance(obj, dict):
-        raise ValueError("refiner output must be a JSON object")
-    return ContentNode.from_dict(p2p_dict_to_content_tree(obj))
+        try:
+            obj = _parse_json(text)
+        except (json.JSONDecodeError, ValueError):
+            obj = None
+    if isinstance(obj, dict):
+        return ContentNode.from_dict(p2p_dict_to_content_tree(obj))
+    if allow_repair:
+        repaired = normalize_refiner_json(text)
+        if repaired:
+            obj = json.loads(repaired)
+            return ContentNode.from_dict(p2p_dict_to_content_tree(obj))
+    raise ValueError("refiner output is not valid JSON / ContentNode")
+
+
+def parse_error(text: str) -> str | None:
+    try:
+        load_content_node_from_text(text, allow_repair=False)
+        return None
+    except Exception as exc:
+        repaired = normalize_refiner_json(text)
+        if repaired:
+            try:
+                load_content_node_from_text(repaired, allow_repair=False)
+                return f"repairable: {exc}"
+            except Exception as exc2:
+                return f"{exc}; after repair: {exc2}"
+        return str(exc)
 
 
 def load_content_node_from_dict(data: dict[str, Any]) -> ContentNode:
