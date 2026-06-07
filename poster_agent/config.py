@@ -27,6 +27,9 @@ class PosterConfig:
     margin: int = 60
     score_threshold: float = 0.85
     max_iterations: int = 5
+    inner_paint_passes: int = 1  # Painter–Commenter 内层重绘次数（Paper2Poster）
+    min_body_font: int = 34
+    min_title_font: int = 42
     section_weights: dict[str, float] = field(
         default_factory=lambda: {
             "title": 0.12,
@@ -52,8 +55,23 @@ class Config:
         cfg = cls()
         key_file = api_key_path or PROJECT_ROOT / "api_key.txt"
         if key_file.exists():
-            cfg.llm.api_key = key_file.read_text(encoding="utf-8").strip()
+            cfg.llm.api_key = _read_api_key_file(key_file)
         cfg.llm.api_key = cfg.llm.api_key or os.getenv("DEEPSEEK_API_KEY", "")
         cfg.output_dir.mkdir(parents=True, exist_ok=True)
         SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
         return cfg
+
+
+def _read_api_key_file(path: Path) -> str:
+    for enc in ("utf-8", "utf-8-sig", "gbk", "latin-1"):
+        try:
+            text = path.read_text(encoding=enc).strip()
+            if text:
+                for line in text.splitlines():
+                    line = line.strip()
+                    if line.startswith("sk-"):
+                        return line
+                return text
+        except (UnicodeDecodeError, OSError):
+            continue
+    return ""

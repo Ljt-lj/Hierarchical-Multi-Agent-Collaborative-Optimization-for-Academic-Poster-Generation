@@ -21,16 +21,22 @@ class RefinerAgent:
     ) -> ContentNode:
         system = (
             "You are an academic poster content refiner. Compress the document tree for poster display. "
-            "Requirements: 1) Keep cross-section logic links; 2) 2-4 bullets per section; "
-            "3) summary within 120 chars; 4) weight 0-1 for section importance. "
+            "Requirements: 1) Keep cross-section logic links; 2) 2-4 substantive bullets per section with "
+            "concrete numbers, datasets, or method names from the paper; 3) summary within 120 chars; "
+            "4) weight 0-1 for section importance; 5) fill each section—avoid sparse one-line bullets; "
+            "6) if feedback mentions OVERFLOW, shorten bullets to max ~2 lines each; "
+            "7) if feedback mentions SPARSE/WHITESPACE, add more bullets and key metrics. "
             "Output JSON: {title, summary, bullets, weight, logic_links, children}. "
             + language_instruction(language)
         )
         if language == "zh":
             system = (
                 "你是学术海报内容精炼专家。将文档树压缩为适合海报展示的内容树。"
-                "要求：1) 保留章节间逻辑依赖（logic_links）；2) 每节 2-4 条 bullets；"
-                "3) summary 不超过 80 字；4) weight 表示章节重要性。"
+                "要求：1) 保留章节间逻辑依赖（logic_links）；2) 每节 2-4 条实质性 bullets，"
+                "包含论文中的具体数字、数据集或方法名；3) summary 不超过 80 字；"
+                "4) weight 表示章节重要性；5) 填满各区块，避免只有一行内容的稀疏区块；"
+                "6) 若反馈含 OVERFLOW，缩短 bullets 至每条约 2 行；"
+                "7) 若反馈含 SPARSE/WHITESPACE，增加 bullets 与关键指标。"
                 "输出 JSON：{title, summary, bullets, weight, logic_links, children}。"
                 + language_instruction(language)
             )
@@ -68,7 +74,10 @@ class RefinerAgent:
         def walk(n: ContentNode) -> None:
             w = match_weight(n.title)
             if w is not None:
-                n.weight = w
+                if n.weight and n.weight > 0:
+                    n.weight = 0.5 * w + 0.5 * n.weight
+                else:
+                    n.weight = w
             for c in n.children:
                 walk(c)
 

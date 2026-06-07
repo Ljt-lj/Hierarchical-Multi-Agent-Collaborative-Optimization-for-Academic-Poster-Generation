@@ -29,7 +29,7 @@ class GridLayoutEngine:
     def __init__(self, config: PosterConfig):
         self.config = config
 
-    def layout(self, content: ContentNode) -> PosterNode:
+    def layout(self, content: ContentNode, height_boost: dict[str, float] | None = None) -> PosterNode:
         sections = _collect_sections(content)
         if not sections:
             sections = [content]
@@ -45,7 +45,7 @@ class GridLayoutEngine:
         children: list[PosterNode] = []
 
         if abstract:
-            plan = _plan_section(abstract, content_w, full_width=True)
+            plan = _plan_section(abstract, content_w, self.config, full_width=True)
             h = min(plan.estimated_h, int((content_bottom - content_y) * 0.28))
             h = max(h, plan.estimated_h // 2)
             rect = LayoutRect(content_x, content_y, content_w, h)
@@ -62,7 +62,7 @@ class GridLayoutEngine:
         col_w = (content_w - BLOCK_GAP * (num_cols - 1)) // num_cols
         available_h = content_bottom - body_start_y
 
-        plans = [_plan_section(s, col_w) for s in body_sections]
+        plans = [_plan_section(s, col_w, self.config) for s in body_sections]
         weights = [_section_layout_weight(s) for s in body_sections]
         total_est = sum(p.estimated_h * w for p, w in zip(plans, weights)) + BLOCK_GAP * (len(plans) // num_cols)
         scale = min(1.0, available_h / max(total_est, 1))
@@ -71,7 +71,12 @@ class GridLayoutEngine:
         placed: list[tuple[PosterNode, int]] = []
 
         for plan, section, weight in zip(plans, body_sections, weights):
-            h = max(int(plan.estimated_h * weight * scale), _min_section_height(plan))
+            boost = 1.0
+            if height_boost:
+                for key, mult in height_boost.items():
+                    if key.lower() in section.title.lower() or section.title.lower() in key.lower():
+                        boost = max(boost, mult)
+            h = max(int(plan.estimated_h * weight * scale * boost), _min_section_height(plan))
             col = min(range(num_cols), key=lambda i: col_heights[i])
             x = content_x + col * (col_w + BLOCK_GAP)
             y = col_heights[col]
@@ -136,21 +141,23 @@ def _make_node(section: ContentNode, rect: LayoutRect, plan: _SectionPlan) -> Po
     )
 
 
-def _plan_fonts(node: ContentNode, layout: str) -> tuple[int, int, int]:
+def _plan_fonts(node: ContentNode, layout: str, config: PosterConfig) -> tuple[int, int, int]:
     t = node.title.lower()
     if _is_reference(t):
-        body, title = 24, 32
+        body, title = 28, 36
     elif len(node.bullets) >= 4:
-        body, title = 30, 38
-    else:
         body, title = 32, 40
+    else:
+        body, title = 34, 42
+    body = max(body, config.min_body_font if not _is_reference(t) else 28)
+    title = max(title, config.min_title_font if not _is_reference(t) else 36)
     bar_h = title + 28
     return body, title, bar_h
 
 
-def _plan_section(node: ContentNode, col_w: int, full_width: bool = False) -> _SectionPlan:
+def _plan_section(node: ContentNode, col_w: int, config: PosterConfig, full_width: bool = False) -> _SectionPlan:
     layout = _choose_layout(node)
-    body_font, title_font, bar_h = _plan_fonts(node, layout)
+    body_font, title_font, bar_h = _plan_fonts(node, layout, config)
     text_h = _text_height(node, col_w, layout, body_font)
     fig_h = _figure_height(node, col_w, layout)
     chrome = bar_h + INNER_PAD * 3
@@ -266,17 +273,19 @@ def _stretch_column_tails(
 
 def _section_layout_weight(node: ContentNode) -> float:
     t = node.title.lower()
+    heuristic = 1.0
     if _is_intro(t):
-        return 0.78
-    if "conclusion" in t or "结论" in t:
-        return 1.28
-    if _is_experiment(t):
-        return 1.08
-    if _is_method(t):
-        return 0.95
-    if "background" in t or "背景" in t:
-        return 0.92
-    return 1.0
+        heuristic = 0.78
+    elif "conclusion" in t or "结论" in t:
+        heuristic = 1.28
+    elif _is_experiment(t):
+        heuristic = 1.08
+    elif _is_method(t):
+        heuristic = 0.95
+    elif "background" in t or "背景" in t:
+        heuristic = 0.92
+    content_w = float(node.weight) if node.weight and node.weight > 0 else 1.0
+    return 0.55 * heuristic + 0.45 * content_w
 
 
 def _section_stretch_weight(node: ContentNode | None) -> float:

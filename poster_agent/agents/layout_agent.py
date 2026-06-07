@@ -13,6 +13,10 @@ class LayoutAgent:
         self.paper_title = "Academic Poster"
         self._engine = GridLayoutEngine(config)
 
-    def layout(self, content: ContentNode) -> PosterNode:
+    def layout(
+        self,
+        content: ContentNode,
+        height_boost: dict[str, float] | None = None,
+    ) -> PosterNode:
         self.paper_title = content.title or self.paper_title
-        return self._engine.layout(content)
+        return self._engine.layout(content, height_boost=height_boost)

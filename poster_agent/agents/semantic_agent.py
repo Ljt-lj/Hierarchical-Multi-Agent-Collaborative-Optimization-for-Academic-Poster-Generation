@@ -50,8 +50,10 @@ def _content_to_text(node: ContentNode, language: str = "en", indent: int = 0) -
     none_label = "none" if language == "en" else "无"
     links = ", ".join(str(x) for x in node.logic_links) if node.logic_links else none_label
     lines = [
+        f"{pad}[{node.title}] weight={node.weight:.2f}",
         f"{pad}  summary: {node.summary}",
         f"{pad}  bullets: {'; '.join(node.bullets)}",
+        f"{pad}  logic_links: {links}",
     ]
     for c in node.children:
         lines.append(_content_to_text(c, language, indent + 1))

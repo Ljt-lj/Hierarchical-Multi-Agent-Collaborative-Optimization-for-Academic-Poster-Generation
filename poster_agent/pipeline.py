@@ -16,12 +16,14 @@ from poster_agent.agents.controller_agent import ControllerAgent
 from poster_agent.agents.layout_agent import LayoutAgent
 from poster_agent.agents.parser_agent import ParserAgent
 from poster_agent.agents.painter_agent import PainterAgent
+from poster_agent.agents.poster_error_analyzer import PosterErrorAnalyzer
 from poster_agent.agents.refiner_agent import RefinerAgent
 from poster_agent.agents.semantic_agent import SemanticCheckAgent
 from poster_agent.agents.visual_agent import VisualAgent
 from poster_agent.config import Config
 from poster_agent.llm_client import LLMClient
 from poster_agent.models.trees import ContentNode, EvaluationScore, PosterNode, RawNode
+from poster_agent.models.render_report import PosterRenderReport
 from poster_agent.render.language import detect_from_raw_tree
 
 console = Console()
@@ -54,6 +56,7 @@ class PosterPipeline:
         self.painter = PainterAgent(self.config.output_dir)
         self.commenter = CommenterAgent(self.llm)
         self.controller = ControllerAgent(self.config.poster)
+        self.error_analyzer = PosterErrorAnalyzer()
 
     def run(
         self,
@@ -114,18 +117,32 @@ class PosterPipeline:
 
             console.print("  → 绘制智能体")
             paper_title = content_tree.title or raw_tree.title
-            artifacts = self.painter.paint(
-                poster_tree, basename=output_name, iteration=iteration, paper_title=paper_title
+            png_path, pptx_path, poster_tree, render_report = self._paint_with_inner_loop(
+                content_tree,
+                poster_tree,
+                output_name=output_name,
+                iteration=iteration,
+                paper_title=paper_title,
             )
-            png_path = artifacts["png"]
-            pptx_path = artifacts["pptx"]
+
+            console.print("  → 错误分析（GenPilot / Paper2Poster）")
+            pre_issues = self.error_analyzer.analyze(render_report, None, content_tree)
+            if pre_issues:
+                console.print(f"    发现 {len(pre_issues)} 项渲染/内容问题")
 
             console.print("  → 平衡评估智能体")
-            lb_score, balance_metrics = self.balance.evaluate(poster_tree)
+            lb_score, balance_metrics = self.balance.evaluate(poster_tree, render_report)
+
+            error_feedback = self.error_analyzer.format_feedback(pre_issues, paper_lang)
+            refiner_instructions = self.error_analyzer.format_refiner_instructions(pre_issues, paper_lang)
 
             console.print("  → 多模态评论智能体")
             sc, itm, comment_feedback = self.commenter.evaluate(
-                poster_tree, png_path, balance_metrics, language=paper_lang
+                poster_tree,
+                png_path,
+                balance_metrics,
+                language=paper_lang,
+                render_issues=error_feedback,
             )
 
             console.print("  → 全局控制智能体")
@@ -137,6 +154,8 @@ class PosterPipeline:
                 "iteration": iteration,
                 "logic_score": logic_score,
                 "balance_metrics": balance_metrics,
+                "render_issues": len(pre_issues),
+                "overflow_sections": render_report.overflow_sections,
                 **final_score.to_dict(),
             }
             history.append(record)
@@ -157,7 +176,12 @@ class PosterPipeline:
                     console.print(f"[yellow]达到最大迭代次数 {self.config.poster.max_iterations}")
                 break
 
-            feedback = self.controller.build_refiner_feedback(final_score, logic_issues)
+            feedback = self.controller.build_refiner_feedback(
+                final_score,
+                logic_issues,
+                error_feedback=error_feedback,
+                refiner_instructions=refiner_instructions,
+            )
 
         assert content_tree and poster_tree and final_score
         self._save_json({"history": history, "final": final_score.to_dict()}, f"{output_name}_scores.json")
@@ -234,3 +258,41 @@ class PosterPipeline:
             if key in record:
                 table.add_row(key, f"{record[key]:.3f}")
         console.print(table)
+
+    def _paint_with_inner_loop(
+        self,
+        content_tree: ContentNode,
+        poster_tree: PosterNode,
+        *,
+        output_name: str,
+        iteration: int,
+        paper_title: str,
+    ) -> tuple[Path, Path, PosterNode, PosterRenderReport]:
+        png_path = Path()
+        pptx_path = Path()
+        render_report = PosterRenderReport()
+
+        for inner in range(self.config.poster.inner_paint_passes + 1):
+            if inner > 0:
+                overflow = render_report.overflow_sections
+                if not overflow:
+                    break
+                console.print(
+                    f"    Painter–Commenter 内层重绘 {inner}/{self.config.poster.inner_paint_passes} "
+                    f"（增高溢出区块: {', '.join(overflow[:3])}）"
+                )
+                boost = {s: 1.2 for s in overflow}
+                poster_tree = self.layout.layout(content_tree, height_boost=boost)
+                self.painter.attach_visuals_to_poster(poster_tree, content_tree)
+
+            artifacts = self.painter.paint(
+                poster_tree,
+                basename=output_name,
+                iteration=iteration if inner == 0 else iteration * 10 + inner,
+                paper_title=paper_title,
+            )
+            png_path = artifacts["png"]
+            pptx_path = artifacts["pptx"]
+            render_report = self.painter.renderer.last_render_report
+
+        return png_path, pptx_path, poster_tree, render_report

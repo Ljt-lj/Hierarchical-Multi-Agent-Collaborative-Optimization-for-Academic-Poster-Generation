@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from poster_agent.models.render_report import PosterRenderReport, SectionRenderReport
 from poster_agent.models.trees import PosterNode
 from poster_agent.render.image_fit import (
     figure_aspect_ratio,
@@ -37,6 +38,16 @@ PARA_SPACING = 12
 SHADOW_OFFSET = (2, 3)
 
 
+class _FitTracker:
+    """跟踪单区块 bullets 实际渲染数量."""
+
+    def __init__(self) -> None:
+        self.max_next_bullet = 0
+
+    def update(self, next_bullet: int) -> None:
+        self.max_next_bullet = max(self.max_next_bullet, next_bullet)
+
+
 class PosterRenderer:
     CANVAS_W = 2400
     CANVAS_H = 3600
@@ -46,6 +57,7 @@ class PosterRenderer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.paper_title = "Academic Poster"
         self.authors = ""
+        self.last_render_report = PosterRenderReport()
 
     def render_png(
         self,
@@ -60,6 +72,7 @@ class PosterRenderer:
             self.authors = format_body(authors)
         img = Image.new("RGB", (self.CANVAS_W, self.CANVAS_H), THEME["canvas_bg"])
         draw = ImageDraw.Draw(img)
+        self.last_render_report = PosterRenderReport()
         self._draw_header(draw)
         for node in _collect_leaves(tree):
             self._draw_section(draw, img, node)
@@ -191,24 +204,46 @@ class PosterRenderer:
         mode = node.layout_mode or "text_only"
         figures = _collect_figures(node)
         fb = _load_font(node.font_size_body)
+        fit = _FitTracker()
 
         if mode == "figure_top" and figures:
-            self._layout_figure_top(draw, img, node, content_box, figures, fb)
+            self._layout_figure_top(draw, img, node, content_box, figures, fb, fit)
         elif mode in ("figure_adaptive", "side_by_side") and figures:
-            self._layout_figure_adaptive(draw, img, node, content_box, figures, fb)
+            self._layout_figure_adaptive(draw, img, node, content_box, figures, fb, fit)
         elif mode == "figure_bottom" and figures:
-            self._layout_figure_bottom(draw, img, node, content_box, figures, fb)
+            self._layout_figure_bottom(draw, img, node, content_box, figures, fb, fit)
         elif mode == "text_dense":
-            self._layout_text_dense(draw, node, content_box, fb)
+            self._layout_text_dense(draw, node, content_box, fb, fit)
         else:
-            self._layout_text_only(draw, img, node, content_box, figures, fb)
+            self._layout_text_only(draw, img, node, content_box, figures, fb, fit)
 
-    def _layout_figure_adaptive(self, draw, img, node, box, figures, fb) -> None:
+        bullets_total = len(node.bullets)
+        bullets_shown = min(fit.max_next_bullet, bullets_total)
+        has_visual = bool(node.visual_path and Path(node.visual_path).exists())
+        paper_paths = [p for p in node.image_paths if p and Path(p).exists()]
+        has_paper = bool(paper_paths) and not (
+            has_visual and len(paper_paths) == 1 and paper_paths[0] == node.visual_path
+        )
+        char_count = len(node.summary or "") + sum(len(b) for b in node.bullets[:bullets_shown])
+        self.last_render_report.sections.append(
+            SectionRenderReport(
+                title=node.title,
+                bullets_total=bullets_total,
+                bullets_shown=bullets_shown,
+                has_visual=has_visual,
+                has_paper_figure=has_paper or bool(paper_paths),
+                body_font=node.font_size_body,
+                area=node.rect.area,
+                char_count=char_count,
+            )
+        )
+
+    def _layout_figure_adaptive(self, draw, img, node, box, figures, fb, fit: _FitTracker) -> None:
         aspect = figure_aspect_ratio(figures[0])
         if aspect >= 1.08:
-            self._layout_figure_top(draw, img, node, box, figures, fb)
+            self._layout_figure_top(draw, img, node, box, figures, fb, fit)
         else:
-            self._layout_text_wrap(draw, img, node, box, figures, fb, side="right")
+            self._layout_text_wrap(draw, img, node, box, figures, fb, side="right", fit=fit)
 
     def _layout_text_wrap(
         self,
@@ -220,6 +255,7 @@ class PosterRenderer:
         fb,
         *,
         side: str = "right",
+        fit: _FitTracker | None = None,
     ) -> None:
         """瘦高插图置侧，正文环绕（先并排、后通栏续排）."""
         x0, y0, x1, y1 = box
@@ -256,11 +292,12 @@ class PosterRenderer:
             bullet_start=0,
             include_summary=True,
             stop_between_bullets=True,
+            fit=fit,
         )
         flow_y = max(fig_bottom, cy) + gap
         remain_h = max(y1 - flow_y, 36)
         if next_bullet < len(node.bullets):
-            self._draw_text_block(
+            _, next_bullet = self._draw_text_block(
                 draw,
                 node,
                 x0,
@@ -272,9 +309,10 @@ class PosterRenderer:
                 bullet_start=next_bullet,
                 include_summary=False,
                 distribute=True,
+                fit=fit,
             )
         elif remain_h > 50:
-            self._draw_text_block(
+            _, next_bullet = self._draw_text_block(
                 draw,
                 node,
                 x0,
@@ -286,6 +324,7 @@ class PosterRenderer:
                 bullet_start=len(node.bullets),
                 include_summary=False,
                 distribute=True,
+                fit=fit,
             )
 
     def _natural_figure_height(self, path: str, width: int) -> int:
@@ -297,7 +336,7 @@ class PosterRenderer:
         except Exception:
             return int(width * 0.28)
 
-    def _layout_figure_top(self, draw, img, node, box, figures, fb) -> None:
+    def _layout_figure_top(self, draw, img, node, box, figures, fb, fit: _FitTracker) -> None:
         x0, y0, x1, y1 = box
         w, total_h = x1 - x0, y1 - y0
         fig_h = self._figure_slot_height(figures, w, total_h, max_ratio=0.55)
@@ -306,30 +345,30 @@ class PosterRenderer:
         text_h = max(y1 - text_y, 40)
         self._draw_text_block(
             draw, node, x0, text_y, w, text_h, fb,
-            numbered=True, distribute=True,
+            numbered=True, distribute=True, fit=fit,
         )
 
-    def _layout_figure_bottom(self, draw, img, node, box, figures, fb) -> None:
+    def _layout_figure_bottom(self, draw, img, node, box, figures, fb, fit: _FitTracker) -> None:
         x0, y0, x1, y1 = box
         w, total_h = x1 - x0, y1 - y0
         fig_h = self._figure_slot_height(figures, w, total_h, max_ratio=0.42)
         text_h = total_h - fig_h - 10
         text_bottom, _ = self._draw_text_block(
             draw, node, x0, y0, w, text_h, fb,
-            numbered=True, distribute=True,
+            numbered=True, distribute=True, fit=fit,
         )
         fig_y = text_bottom + 8
         fig_alloc = max(y1 - fig_y, int(w * 0.16))
         self._paste_figures(img, figures, x0, fig_y, w, fig_alloc, draw)
 
-    def _layout_text_dense(self, draw, node, box, fb) -> None:
+    def _layout_text_dense(self, draw, node, box, fb, fit: _FitTracker) -> None:
         x0, y0, x1, y1 = box
         self._draw_text_block(
             draw, node, x0, y0, x1 - x0, y1 - y0, fb,
-            numbered=True, compact=True, distribute=True,
+            numbered=True, compact=True, distribute=True, fit=fit,
         )
 
-    def _layout_text_only(self, draw, img, node, box, figures, fb) -> None:
+    def _layout_text_only(self, draw, img, node, box, figures, fb, fit: _FitTracker) -> None:
         x0, y0, x1, y1 = box
         w, total_h = x1 - x0, y1 - y0
         if figures:
@@ -337,13 +376,13 @@ class PosterRenderer:
             text_h = total_h - fig_h - 10
             self._draw_text_block(
                 draw, node, x0, y0, w, text_h, fb,
-                numbered=True, distribute=True,
+                numbered=True, distribute=True, fit=fit,
             )
             self._paste_figures(img, figures, x0, y0 + text_h + 10, w, fig_h, draw)
         else:
             self._draw_text_block(
                 draw, node, x0, y0, w, total_h, fb,
-                numbered=True, distribute=True,
+                numbered=True, distribute=True, fit=fit,
             )
 
     def _figure_slot_height(self, figures: list[str], width: int, total_h: int, *, max_ratio: float) -> int:
@@ -402,6 +441,7 @@ class PosterRenderer:
         bullet_start: int = 0,
         include_summary: bool = True,
         stop_between_bullets: bool = False,
+        fit: _FitTracker | None = None,
     ) -> tuple[int, int]:
         lines: list[tuple[str, int, int | None]] = []
         summary = format_body(node.summary) if include_summary else ""
@@ -446,6 +486,8 @@ class PosterRenderer:
             cy += line_h
             if bullet_idx is not None:
                 next_bullet = bullet_idx + 1
+        if fit is not None:
+            fit.update(next_bullet)
         return cy, next_bullet
 
     def _paste_figures(
