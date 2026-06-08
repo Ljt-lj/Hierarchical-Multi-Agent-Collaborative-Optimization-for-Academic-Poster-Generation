@@ -1,0 +1,5 @@
+name: Li Jiangtao
+Student ID: 23307130167
+email: 23307130167@m.fudan.edu.com
+GitHub: https://github.com/Ljt-lj/Hierarchical-Multi-Agent-Collaborative-Optimization-for-Academic-Poster-Generation.git
+Group Members: Li Jiangtao
