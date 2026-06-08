@@ -10,9 +10,19 @@ from poster_agent.models.visuals import VisualSpec
 
 
 def poster_sections(content: ContentNode) -> list[ContentNode]:
-    if content.children:
-        return list(content.children)
-    return [content]
+    """返回需分配插图/排版的叶子区块（含 Results/Methods 内 panel）."""
+    if not content.children:
+        return [content]
+    out: list[ContentNode] = []
+    for c in content.children:
+        if c.children and c.block_style == "section" and any(
+            ch.block_style == "panel" for ch in c.children
+        ):
+            for panel in c.children:
+                out.append(panel)
+        else:
+            out.append(c)
+    return out
 
 
 def is_abstract_title(title: str) -> bool:

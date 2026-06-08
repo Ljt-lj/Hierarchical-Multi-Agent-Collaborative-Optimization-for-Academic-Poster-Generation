@@ -14,6 +14,7 @@ from poster_agent.agents.balance_agent import BalanceAgent
 from poster_agent.agents.commenter_agent import CommenterAgent
 from poster_agent.agents.controller_agent import ControllerAgent
 from poster_agent.agents.layout_agent import LayoutAgent
+from poster_agent.agents.logic_planner_agent import LogicPlannerAgent
 from poster_agent.agents.parser_agent import ParserAgent
 from poster_agent.agents.painter_agent import PainterAgent
 from poster_agent.agents.poster_error_analyzer import PosterErrorAnalyzer
@@ -25,6 +26,10 @@ from poster_agent.llm_client import LLMClient
 from poster_agent.models.trees import ContentNode, EvaluationScore, PosterNode, RawNode
 from poster_agent.models.render_report import PosterRenderReport
 from poster_agent.render.language import detect_from_raw_tree
+from poster_agent.utils.output_paths import (
+    configure_paper_output,
+    paper_slug_from_source,
+)
 
 console = Console()
 
@@ -39,6 +44,9 @@ class PipelineResult:
     result_png: Path
     result_pptx: Path
     final_score: EvaluationScore
+    output_dir: Path = field(default_factory=Path)
+    paper_slug: str = ""
+    output_name: str = "poster"
     best_iteration: int = 1
     iteration_history: list[dict] = field(default_factory=list)
 
@@ -47,13 +55,14 @@ class PosterPipeline:
     def __init__(self, config: Config | None = None):
         self.config = config or Config.load()
         self.llm = LLMClient(self.config.llm)
-        self.parser = ParserAgent(self.llm)
+        self.parser = ParserAgent(self.llm, self.config.poster)
+        self.logic_planner = LogicPlannerAgent(self.llm)
         self.refiner = RefinerAgent(self.llm, self.config.poster)
-        self.visual = VisualAgent(self.llm)
+        self.visual = VisualAgent(self.llm, self.config.poster)
         self.semantic = SemanticCheckAgent(self.llm)
         self.layout = LayoutAgent(self.config.poster)
         self.balance = BalanceAgent()
-        self.painter = PainterAgent(self.config.output_dir)
+        self.painter = PainterAgent(self.config.output_dir, self.config.poster)
         self.commenter = CommenterAgent(self.llm)
         self.controller = ControllerAgent(self.config.poster)
         self.error_analyzer = PosterErrorAnalyzer()
@@ -77,7 +86,37 @@ class PosterPipeline:
         paper_lang = detect_from_raw_tree(raw_tree)
         console.print(f"[cyan]论文语言: {'中文' if paper_lang == 'zh' else 'English'}")
 
+        paper_slug = paper_slug_from_source(
+            title=raw_tree.title or "",
+            pdf_path=pdf_path if not demo else None,
+        )
+        paper_out, output_name = configure_paper_output(
+            self.config,
+            paper_slug=paper_slug,
+            output_name=output_name,
+        )
+        self.painter = PainterAgent(paper_out, self.config.poster)
+        console.print(f"[cyan]论文目录: {paper_out}")
+        console.print(f"[cyan]输出前缀: {output_name}")
+
         self._save_json(raw_tree.to_dict(), f"{output_name}_raw_tree.json")
+        if raw_tree.tables:
+            self._save_json(raw_tree.tables, f"{output_name}_paper_tables.json")
+        if raw_tree.figure_catalog:
+            self._save_json(raw_tree.figure_catalog, f"{output_name}_figure_catalog.json")
+
+        console.print("  → 逻辑规划智能体")
+        logic_plan = self.logic_planner.plan(raw_tree, language=paper_lang)
+        self._save_json(
+            {
+                "core_problem": logic_plan.core_problem,
+                "pipeline_steps": logic_plan.pipeline_steps,
+                "validation_chain": logic_plan.validation_chain,
+                "key_terms": logic_plan.key_terms,
+                "poster_sections": logic_plan.poster_sections,
+            },
+            f"{output_name}_logic_plan.json",
+        )
 
         feedback = ""
         content_tree: ContentNode | None = None
@@ -95,11 +134,34 @@ class PosterPipeline:
             console.rule(f"[bold]迭代 {iteration}")
 
             console.print("  → 精炼智能体")
-            content_tree = self.refiner.refine(raw_tree, feedback, language=paper_lang)
+            content_tree = self.refiner.refine(
+                raw_tree, feedback, language=paper_lang, logic_plan=logic_plan
+            )
             self._save_json(content_tree.to_dict(), f"{output_name}_content_iter{iteration}.json")
 
+            if self.config.poster.three_column_layout and self.config.poster.academic_style:
+                from poster_agent.agents.section_expander import expand_for_academic_poster
+
+                content = expand_for_academic_poster(
+                    content_tree, raw_tree, logic_plan, paper_lang,
+                    catalog=index_figure_catalog(raw_tree),
+                )
+
             console.print("  → 可视化智能体")
-            content_tree = self.visual.enrich(content_tree, language=paper_lang)
+            from poster_agent.agents.figure_curator import index_figure_catalog
+
+            content_tree = self.visual.enrich(
+                content_tree,
+                language=paper_lang,
+                logic_plan=logic_plan,
+                catalog=index_figure_catalog(raw_tree),
+            )
+
+            if self.config.poster.three_column_layout and self.config.poster.academic_style:
+                from poster_agent.agents.column_balancer import balance_columns
+
+                content_tree = balance_columns(content_tree, self.config.poster)
+
             self.painter.prepare_visuals(
                 content_tree,
                 f"{output_name}_iter{iteration}",
@@ -123,6 +185,7 @@ class PosterPipeline:
                 output_name=output_name,
                 iteration=iteration,
                 paper_title=paper_title,
+                authors=getattr(raw_tree, "authors", "") or "",
             )
 
             console.print("  → 错误分析（GenPilot / Paper2Poster）")
@@ -211,6 +274,9 @@ class PosterPipeline:
             result_png=result_png,
             result_pptx=result_pptx,
             final_score=final_score,
+            output_dir=paper_out,
+            paper_slug=paper_slug,
+            output_name=output_name,
             best_iteration=best_iteration,
             iteration_history=history,
         )
@@ -267,6 +333,7 @@ class PosterPipeline:
         output_name: str,
         iteration: int,
         paper_title: str,
+        authors: str = "",
     ) -> tuple[Path, Path, PosterNode, PosterRenderReport]:
         png_path = Path()
         pptx_path = Path()
@@ -290,6 +357,7 @@ class PosterPipeline:
                 basename=output_name,
                 iteration=iteration if inner == 0 else iteration * 10 + inner,
                 paper_title=paper_title,
+                authors=authors,
             )
             png_path = artifacts["png"]
             pptx_path = artifacts["pptx"]

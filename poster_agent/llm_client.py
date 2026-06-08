@@ -41,27 +41,34 @@ class LLMClient:
         user: str,
         *,
         temperature: float | None = None,
-        retries: int = 2,
+        max_tokens: int | None = None,
+        retries: int = 3,
     ) -> Any:
         last_error: Exception | None = None
         for attempt in range(retries + 1):
             prompt = user
             if attempt > 0:
-                prompt += "\n\n上次输出不是合法 JSON，请重新输出完整且可解析的 JSON。"
+                prompt += "\n\nYour previous output was empty or invalid JSON. Reply with ONLY valid JSON."
             text = self.chat(
-                system + "\n请只输出合法 JSON，不要包含 markdown 代码块。",
+                system + "\nOutput ONLY valid JSON. No markdown fences, no commentary.",
                 prompt,
-                temperature=temperature,
+                temperature=temperature if temperature is not None else max(0.1, (self.config.temperature or 0.3) - 0.1 * attempt),
+                max_tokens=max_tokens,
             )
+            if not text.strip():
+                last_error = ValueError("LLM returned empty response")
+                continue
             try:
                 return _parse_json(text)
             except (json.JSONDecodeError, ValueError) as exc:
                 last_error = exc
-        raise last_error  # type: ignore[misc]
+        raise RuntimeError(f"Failed to parse LLM JSON after {retries + 1} attempts: {last_error}") from last_error
 
 
 def _parse_json(text: str) -> Any:
     text = text.strip()
+    if not text:
+        raise ValueError("empty JSON text")
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if fence:
         text = fence.group(1).strip()

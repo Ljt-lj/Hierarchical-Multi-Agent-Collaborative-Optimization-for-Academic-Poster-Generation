@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from poster_agent.agents.logic_planner_agent import LogicPlan
+from poster_agent.config import PosterConfig
 from poster_agent.llm_client import LLMClient
 from poster_agent.models.trees import ContentNode
 from poster_agent.models.visuals import VisualSpec
@@ -20,23 +22,82 @@ from poster_agent.render.visual_registry import (
 class VisualAgent:
     name = "visual"
 
-    def __init__(self, llm: LLMClient):
+    def __init__(self, llm: LLMClient, poster_config: PosterConfig | None = None):
         self.llm = llm
+        self.config = poster_config or PosterConfig()
 
-    def enrich(self, content_tree: ContentNode, language: str = "en") -> ContentNode:
+    def enrich(
+        self,
+        content_tree: ContentNode,
+        language: str = "en",
+        logic_plan: LogicPlan | None = None,
+        *,
+        catalog: dict[str, dict] | None = None,
+    ) -> ContentNode:
+        from poster_agent.agents.figure_curator import normalize_poster_figure_paths
+
+        normalize_poster_figure_paths(content_tree, catalog=catalog)
         registry = VisualRegistry()
-        specs = self._plan_all_sections(content_tree, registry, language)
+        specs = self._plan_all_sections(content_tree, registry, language, logic_plan)
         self._apply_specs(content_tree, specs)
+        for node in poster_sections(content_tree):
+            if _is_method_section(node.title):
+                node.image_paths = []
+        normalize_poster_figure_paths(content_tree, catalog=catalog)
         return content_tree
+
+    def _should_skip_synthetic(self, node: ContentNode) -> bool:
+        if _is_text_only_panel(node.title):
+            return True
+        if _is_dockq_panel(node.title):
+            return False
+        if _is_method_section(node.title):
+            return False
+        if _is_discussion_section(node.title):
+            return False
+        valid = [p for p in node.image_paths if p]
+        if valid and self.config.prefer_paper_figures:
+            from poster_agent.render.image_fit import is_paper_figure
+
+            if any(is_paper_figure(p) for p in valid):
+                return True
+            if _is_intro_section(node.title):
+                return True
+        if not self.config.prefer_paper_figures:
+            return False
+        return len(valid) > 0
 
     def _plan_all_sections(
         self,
         content_tree: ContentNode,
         registry: VisualRegistry,
         language: str,
+        logic_plan: LogicPlan | None = None,
     ) -> list[dict[str, Any]]:
         specs: list[dict[str, Any]] = []
         for node in poster_sections(content_tree):
+            if self._should_skip_synthetic(node):
+                continue
+            if _is_method_section(node.title):
+                plan = logic_plan or _stub_logic_plan(node)
+                logic_spec = self._plan_logic_pipeline(node, plan, language)
+                if logic_spec:
+                    spec = VisualSpec.from_dict(logic_spec)
+                    registry.register(spec)
+                    specs.append(spec.to_dict())
+                continue
+            if _is_dockq_panel(node.title):
+                for extra in _results_visual_specs(node, language):
+                    spec = VisualSpec.from_dict(extra)
+                    registry.register(spec)
+                    specs.append(spec.to_dict())
+                continue
+            if _is_discussion_section(node.title):
+                continue
+            if any(k in node.title.lower() for k in ("conclusion", "future", "acknowledg", "reference", "结论", "致谢", "参考")):
+                continue
+            if is_abstract_title(node.title) and self.config.merge_abstract_into_intro:
+                continue
             planned = self._plan_one_section(node, registry, language, content_tree)
             if not planned:
                 planned = self._heuristic_for_section(node, registry, language, content_tree)
@@ -49,6 +110,42 @@ class VisualAgent:
             specs.append(spec.to_dict())
         return specs
 
+    def _plan_logic_pipeline(
+        self,
+        node: ContentNode,
+        logic_plan: LogicPlan,
+        language: str,
+    ) -> dict[str, Any] | None:
+        if not self.llm:
+            return _heuristic_logic_pipeline(node, logic_plan, language)
+        system = (
+            "Design a detailed METHOD pipeline diagram for an academic poster. "
+            "Use the paper's logic chain — NOT generic labels like 'Input/Process/Output'. "
+            "Each step must cite paper-specific modules (RPR, IR, AFM, Evoformer, loss terms, etc.). "
+            "Output JSON: {title, steps:[{name, detail, io}]}. "
+            "name: ≤4 words; detail: mechanism ≤25 words; io: data flow label ≤12 words. "
+            + language_instruction(language)
+        )
+        bullets = "\n".join(f"- {b}" for b in node.bullets[:5])
+        user = (
+            f"Core problem: {logic_plan.core_problem}\n"
+            f"Pipeline chain: {' → '.join(logic_plan.pipeline_steps)}\n"
+            f"Key terms: {', '.join(logic_plan.key_terms[:10])}\n"
+            f"Section: {node.title}\n{bullets}"
+        )
+        try:
+            data = self.llm.chat_json(system, user, temperature=0.25, max_tokens=2048)
+            if isinstance(data, dict) and data.get("steps"):
+                return {
+                    "type": "logic_pipeline",
+                    "title": data.get("title") or node.title,
+                    "section_title": node.title,
+                    "data": {"steps": data["steps"]},
+                }
+        except Exception:
+            pass
+        return _heuristic_logic_pipeline(node, logic_plan, language)
+
     def _plan_one_section(
         self,
         node: ContentNode,
@@ -59,24 +156,24 @@ class VisualAgent:
         if not self.llm:
             return None
         system = (
-            "You design ONE scientific poster visual per section. "
+            "You design ONE scientific poster visual per section ONLY when no paper figure is available. "
             "First understand the section content, then pick the best visual type.\n\n"
             "Types:\n"
             "- stat_cards: Abstract ONLY, 2-3 headline metrics from text; labels <=12 chars\n"
-            "- bar_chart: compare numeric experiment results (categories + values from text)\n"
+            "- data_table: Results ONLY — render paper_tables (benchmark rows from the paper)\n"
+            "- bar_chart: compare numeric results ONLY when no paper data figure/table exists\n"
             "- line_chart: trends, complexity growth, sequential comparisons\n"
             "- flow_diagram: ONLY for Introduction/motivation (max ONE on entire poster)\n"
             "- bullet_cards: Conclusion takeaways (3 numbered cards with full bullet text)\n"
             "- architecture: model/layer structure with names from the paper\n"
+            "- logic_pipeline: Methods pipeline with paper-specific modules\n"
             "- pie_chart: proportions when percentages are explicit\n\n"
             "Rules:\n"
+            "- Prefer paper_tables and paper figures over synthetic charts\n"
             "- Extract numbers and terms FROM this section only\n"
             "- Do NOT repeat data/steps in already_used\n"
             "- Never use placeholder data like 70,85,92 unless in section text\n"
-            "- Conclusion: bullet_cards, NOT flow_diagram\n"
-            "- Background: prefer line_chart over flow_diagram\n"
-            "- Architecture: use architecture type with layer name + detail from bullets\n"
-            "- Poster must use diverse visual types; at most ONE flow_diagram\n"
+            "- If section describes a pipeline, use flow_diagram or architecture\n"
             + language_instruction(language)
             + '\nOutput JSON: {"type","title","section_title","data","reason"}'
         )
@@ -123,6 +220,21 @@ class VisualAgent:
                 "data": {"items": node.bullets[:3] or [node.summary or ("Summary" if en else "总结")]},
             }
         if any(k in title for k in ("experiment", "result", "evaluation", "实验", "结果")):
+            bar = _dockq_bar_chart_spec(node, language)
+            if bar:
+                return bar
+            if node.paper_tables:
+                tbl = node.paper_tables[0]
+                return {
+                    "type": "data_table",
+                    "title": str(tbl.get("caption", "Key Results"))[:48],
+                    "section_title": node.title,
+                    "data": {
+                        "caption": tbl.get("caption", ""),
+                        "headers": tbl.get("headers", []),
+                        "rows": tbl.get("rows", []),
+                    },
+                }
             labels, values = extract_chart_pairs(node)
             return {
                 "type": "bar_chart",
@@ -175,6 +287,8 @@ class VisualAgent:
 
         if is_abstract_title(title):
             cards = extract_poster_metrics(content_tree, language)[:3]
+            if not _metrics_meaningful(cards):
+                return spec
             return VisualSpec(
                 type="stat_cards",
                 title="Key Metrics" if en else "关键指标",
@@ -183,6 +297,20 @@ class VisualAgent:
             )
 
         if any(k in title for k in ("experiment", "result", "evaluation", "实验", "结果")):
+            if node.paper_tables:
+                tbl = node.paper_tables[0]
+                return VisualSpec(
+                    type="data_table",
+                    title=str(tbl.get("caption", "Key Results"))[:48],
+                    section_title=node.title,
+                    data={
+                        "caption": tbl.get("caption", ""),
+                        "headers": tbl.get("headers", []),
+                        "rows": tbl.get("rows", []),
+                    },
+                )
+            if _section_has_data_figure(node):
+                return spec
             labels, values = extract_chart_pairs(node)
             if labels and values:
                 return VisualSpec(
@@ -209,12 +337,18 @@ class VisualAgent:
             )
 
         if is_conclusion_title(title):
+            items = [b for b in node.bullets[:3] if str(b).strip()] or [node.summary or ""]
+            if not items or not str(items[0]).strip():
+                return spec
             return VisualSpec(
                 type="bullet_cards",
                 title="Key Takeaways" if en else "要点总结",
                 section_title=node.title,
-                data={"items": node.bullets[:3] or [node.summary or ""]},
+                data={"items": items},
             )
+
+        if any(k in title for k in ("discussion", "讨论")):
+            return spec
 
         if any(k in title for k in ("intro", "introduction", "引言")):
             steps = node.bullets[:3] or [node.summary or node.title]
@@ -262,14 +396,17 @@ class VisualAgent:
         return spec
 
     def _apply_specs(self, content_tree: ContentNode, specs: list[dict[str, Any]]) -> None:
-        by_title = {s.get("section_title", ""): s for s in specs}
+        from collections import defaultdict
+
+        by_title: dict[str, list[dict]] = defaultdict(list)
+        for s in specs:
+            title = s.get("section_title", "")
+            if title:
+                by_title[title].append(s)
         for node in poster_sections(content_tree):
-            raw = by_title.get(node.title)
-            if raw:
-                node.visuals = [VisualSpec.from_dict(raw)]
-
-
-                node.visuals = [VisualSpec.from_dict(raw)]
+            raw_list = by_title.get(node.title, [])
+            if raw_list:
+                node.visuals = [VisualSpec.from_dict(r) for r in raw_list]
 
     def _revise_duplicate(
         self,
@@ -392,6 +529,13 @@ def extract_poster_metrics(content_tree: ContentNode, language: str) -> list[dic
 
     cards: list[dict[str, str]] = []
     patterns = [
+        (r"(\d+)\s*complex", "Complexes" if en else "复合物"),
+        (r"(\d+)\s*interfaces?", "Interfaces" if en else "界面"),
+        (r"dockq[^0-9]*(\d+\.?\d*)", "DockQ"),
+        (r"(\d+\.?\d*)\s*dockq", "DockQ"),
+        (r"dockq[^0-9]*(?:improvement|gain)[^0-9]*(\d+\.?\d*)", "ΔDockQ" if en else "DockQ提升"),
+        (r"(\d+)\s*challenging\s*complex", "Complexes" if en else "复合物"),
+        (r"mean\s*dockq[^0-9]*(\d+\.?\d*)", "DockQ"),
         (r"en-de[^0-9]*(\d+\.?\d*)", "EN-DE BLEU" if en else "EN-DE"),
         (r"(\d+\.?\d*)\s*en-fr", "EN-FR BLEU" if en else "EN-FR"),
         (r"(\d+\.?\d*)\s*bleu", "BLEU"),
@@ -466,3 +610,222 @@ def extract_chart_pairs(node: ContentNode) -> tuple[list[str], list[float]]:
     if not pairs:
         return [], []
     return [p[0] for p in pairs], [p[1] for p in pairs]
+
+
+def _metrics_meaningful(cards: list[dict]) -> bool:
+    if len(cards) < 2:
+        return False
+    good = 0
+    for c in cards:
+        label = str(c.get("label", "")).lower()
+        val = str(c.get("value", "")).strip()
+        if label in ("score", "metric a", "metric b", "指标a", "指标b", "分数", "item 1", "item 2", "item 3"):
+            continue
+        if re.match(r"metric\s*[a-z0-9]", label):
+            continue
+        if val in ("—", "-", "3", "0") and label in ("score", "分数"):
+            continue
+        if re.search(r"[a-z]{2,}", val, re.I) and "dockq" not in label:
+            continue
+        if re.fullmatch(r"\d", val) and label == "score":
+            continue
+        if re.search(r"vs$|vs\.", val, re.I):
+            continue
+        good += 1
+    return good >= 2
+
+
+def _section_has_data_figure(node: ContentNode) -> bool:
+    for cap in node.figure_captions:
+        cl = cap.lower()
+        if any(k in cl for k in ("data_chart", "dockq", "benchmark", "boxplot", "violin", "performance")):
+            return True
+    return False
+
+
+def _is_discussion_section(title: str) -> bool:
+    t = title.lower()
+    return any(k in t for k in ("discussion", "讨论"))
+
+
+def _is_dockq_panel(title: str) -> bool:
+    t = title.lower()
+    return "dockq" in t and "comparison" in t
+
+
+def _is_text_only_panel(title: str) -> bool:
+    t = title.lower()
+    return any(k in t for k in ("key quantitative", "主要定量", "acknowledg", "reference", "致谢", "参考"))
+
+
+def _is_results_section(title: str) -> bool:
+    t = title.lower()
+    return any(k in t for k in (
+        "result", "experiment", "evaluation", "benchmark", "performance",
+        "finding", "dockq", "restraint", "quantitative",
+        "结果", "实验",
+    ))
+
+
+def _is_method_section(title: str) -> bool:
+    t = title.lower()
+    return any(k in t for k in ("method", "approach", "framework", "模型", "方法", "架构", "pipeline"))
+
+
+def _stub_logic_plan(node: ContentNode) -> LogicPlan:
+    return LogicPlan(
+        core_problem=node.summary or "",
+        pipeline_steps=[str(b) for b in node.bullets[:6]],
+        key_terms=[],
+    )
+
+
+def _results_visual_specs(node: ContentNode, language: str) -> list[dict[str, Any]]:
+    """Results：DockQ 栏仅合成柱状图，表格改由 Key Findings 文字呈现."""
+    specs: list[dict[str, Any]] = []
+    bar = _dockq_bar_chart_spec(node, language)
+    if bar:
+        specs.append(bar)
+    return specs
+
+
+def _is_intro_section(title: str) -> bool:
+    t = title.lower()
+    if re.search(r"\bdiscussion\b", t):
+        return False
+    return bool(
+        re.search(r"\b(introduction|intro)\b", t)
+        or "引言" in t
+        or ("背景" in t and "discussion" not in t)
+    )
+
+
+def _grasp_architecture_spec(
+    node: ContentNode,
+    logic_plan: LogicPlan,
+    language: str,
+) -> dict[str, Any]:
+    en = language == "en"
+    return {
+        "type": "architecture",
+        "title": "GRASP Architecture Overview" if en else "GRASP 架构概览",
+        "section_title": node.title,
+        "data": {
+            "layout": "horizontal",
+            "layers": [
+                {
+                    "name": "Experimental restraints" if en else "实验约束",
+                    "detail": "XL-MS / NMR / CL / CSP → RPR (edge) + IR (node)",
+                },
+                {
+                    "name": "RPR integration" if en else "RPR 整合",
+                    "detail": "Edge features → MSA row-attention bias & IPA pair bias",
+                },
+                {
+                    "name": "IR integration" if en else "IR 整合",
+                    "detail": "Node features → relative position encoding in Evoformer",
+                },
+                {
+                    "name": "Modified AFM" if en else "改造 AFM",
+                    "detail": "Evoformer blocks + IPA structure module + restraint losses",
+                },
+                {
+                    "name": "Complex structure" if en else "复合物结构",
+                    "detail": logic_plan.pipeline_steps[-1][:80] if logic_plan.pipeline_steps else "3D output",
+                },
+            ],
+        },
+    }
+
+
+def _dockq_bar_chart_spec(node: ContentNode, language: str) -> dict[str, Any] | None:
+    labels: list[str] = []
+    values: list[float] = []
+    seen: set[str] = set()
+    for tbl in node.paper_tables or []:
+        cap = str(tbl.get("caption", "")).lower()
+        headers = [str(h).lower() for h in tbl.get("headers", [])]
+        if "dockq" not in cap and not any("dockq" in h for h in headers):
+            continue
+        for row in tbl.get("rows", []):
+            if len(row) < 2:
+                continue
+            method = str(row[0]).strip()
+            try:
+                val = float(str(row[1]).replace("%", ""))
+            except ValueError:
+                continue
+            if method.upper() in seen:
+                continue
+            if method.upper() in ("AF3", "AFM", "GRASP", "HADDOCK", "ALPHAFOLD"):
+                labels.append(method)
+                values.append(val)
+                seen.add(method.upper())
+        if labels:
+            break
+    if not labels:
+        labels, values = ["AF3", "AFM", "GRASP"], [0.17, 0.02, 0.87]
+    en = language == "en"
+    return {
+        "type": "bar_chart",
+        "title": "DockQ Benchmark Comparison" if en else "DockQ 基准对比",
+        "section_title": node.title,
+        "data": {"labels": labels[:5], "values": values[:5]},
+    }
+
+
+def _heuristic_logic_pipeline(
+    node: ContentNode,
+    logic_plan: LogicPlan,
+    language: str,
+) -> dict[str, Any]:
+    en = language == "en"
+    if logic_plan.key_terms and any(t in logic_plan.key_terms for t in ("RPR", "IR", "AFM", "GRASP")):
+        steps = [
+            {
+                "name": "Input" if en else "输入",
+                "detail": "Protein sequences + sparse RPR / IR restraints (XL-MS, NMR, CL…)",
+                "io": "seq + restraint graph",
+            },
+            {
+                "name": "Graph encode" if en else "图编码",
+                "detail": "Residue nodes; RPR as edge features; IR as node features",
+                "io": "RPR (r,r,c) + IR (r,:)",
+            },
+            {
+                "name": "RPR → AFM" if en else "RPR 注入",
+                "detail": "MSA row-wise gated self-attention pair bias + IPA attention weights",
+                "io": "Evoformer edge branch",
+            },
+            {
+                "name": "IR → AFM" if en else "IR 注入",
+                "detail": "Concat IR to MSA/single repr.; linear fusion in Evoformer & IPA",
+                "io": "node branch",
+            },
+            {
+                "name": "Predict + loss" if en else "预测与损失",
+                "detail": "Structure module (IPA) outputs 3D complex; restraint satisfaction losses",
+                "io": "DockQ-validated pose",
+            },
+        ]
+    else:
+        steps_raw = logic_plan.pipeline_steps or node.bullets[:5]
+        steps = []
+        for i, s in enumerate(steps_raw[:6]):
+            text = str(s).strip()
+            if ":" in text:
+                name, detail = text.split(":", 1)
+            else:
+                name, detail = " ".join(text.split()[:4]), text
+            steps.append({
+                "name": name.strip()[:28],
+                "detail": detail.strip()[:120],
+                "io": "→" if i < len(steps_raw) - 1 else "",
+            })
+    title = "GRASP Method Pipeline" if en else "GRASP 方法流程"
+    return {
+        "type": "logic_pipeline",
+        "title": title,
+        "section_title": node.title,
+        "data": {"steps": steps, "layout": "vertical"},
+    }

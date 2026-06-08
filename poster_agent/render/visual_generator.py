@@ -13,12 +13,24 @@ import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont
 
 from poster_agent.models.visuals import VisualSpec
+from poster_agent.render.poster_style import (
+    ACCENT_RGB,
+    ARROW_GRAY,
+    BG_TABLE_ALT,
+    CHART_ACCENT,
+    CHART_NEUTRAL,
+    FLOW_BORDER,
+    FLOW_FILL,
+    FLOW_TITLE,
+    chart_colors,
+)
 from poster_agent.render.text_utils import format_body, smart_title
 
 plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode MS", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
 
-PALETTE = ["#3463AA", "#E8637B", "#F5A623", "#50C878", "#9B59B6", "#1ABC9C"]
+# 保留旧名兼容；新图统一用 poster_style
+PALETTE = ["#C45C26", "#9A9A9A", "#B5B5B5", "#757575", "#C4A882", "#8E8E8E"]
 CARD_RADIUS = 4
 FLOW_RADIUS = 4
 STEP_ICONS = ["doc", "gear", "chart", "flag", "star"]
@@ -44,9 +56,11 @@ class VisualGenerator:
             "line_chart": self._line_chart,
             "pie_chart": self._pie_chart,
             "flow_diagram": self._flow_diagram,
+            "logic_pipeline": self._logic_pipeline,
             "architecture": self._architecture,
             "stat_cards": self._stat_cards,
             "bullet_cards": self._bullet_cards,
+            "data_table": self._data_table,
             "figure": self._figure,
         }
         fn = generators.get(spec.type)
@@ -59,24 +73,29 @@ class VisualGenerator:
         values = spec.data.get("values", [70, 85, 92])
         raw_labels, values = _align_label_values(raw_labels, values)
         labels = [_short_label(smart_title(x), 14) for x in raw_labels]
-        fig_w = max(4.2, min(len(labels) * 1.05, 7.5))
-        fig, ax = plt.subplots(figsize=(fig_w, 3.0), dpi=120)
-        colors = PALETTE[: len(values)]
-        bars = ax.bar(labels, values, color=colors, edgecolor="white", linewidth=1.2)
+        fig_w = max(5.5, min(len(labels) * 1.25, 9.0))
+        fig, ax = plt.subplots(figsize=(fig_w, 3.4), dpi=140)
+        colors = chart_colors(labels)
+        bars = ax.bar(labels, values, color=colors, edgecolor="white", linewidth=1.0)
         title = smart_title(spec.title or "Results")
-        ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
+        ax.set_title(title, fontsize=13, fontweight="bold", pad=10, color="#1C1C1C")
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        ax.set_ylabel("Score", fontsize=10)
-        ax.tick_params(labelsize=8)
+        ax.spines["left"].set_color("#CCCCCC")
+        ax.spines["bottom"].set_color("#CCCCCC")
+        ax.set_ylabel("Score", fontsize=10, color="#555555")
+        ax.tick_params(labelsize=8, colors="#444444")
+        ax.set_facecolor("white")
+        fig.patch.set_facecolor("white")
         max_val = max(float(v) for v in values) if values else 1
-        ax.set_ylim(0, max_val * 1.15 + 2)
+        y_pad = max(max_val * 0.15, 0.05) if max_val < 10 else max_val * 0.15 + 2
+        ax.set_ylim(0, max_val + y_pad)
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=18, ha="right")
         for bar, val in zip(bars, values):
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 1,
-                f"{val:.0f}" if isinstance(val, float) else str(val),
+                bar.get_height() + y_pad * 0.08,
+                _format_bar_value(val),
                 ha="center",
                 va="bottom",
                 fontsize=10,
@@ -125,6 +144,121 @@ class VisualGenerator:
         if any(k in title.lower() for k in ("conclusion", "takeaway", "future", "结论", "总结")):
             return self._flow_diagram_vertical(steps, title, name)
         return self._flow_diagram_horizontal(steps, title, name)
+
+    def _logic_pipeline(self, spec: VisualSpec, name: str) -> Path:
+        """逻辑流程图：每步含名称、机制说明、数据流（基于 LogicPlan）."""
+        raw_steps = spec.data.get("steps") or []
+        layout = str(spec.data.get("layout", "")).lower()
+        steps: list[dict[str, str]] = []
+        for item in raw_steps[:6]:
+            if isinstance(item, dict):
+                steps.append({
+                    "name": str(item.get("name", ""))[:32],
+                    "detail": format_body(str(item.get("detail", "")))[:140],
+                    "io": str(item.get("io", ""))[:40],
+                })
+            else:
+                text = format_body(str(item))
+                if ":" in text:
+                    n, d = text.split(":", 1)
+                    steps.append({"name": n.strip()[:32], "detail": d.strip()[:140], "io": ""})
+                else:
+                    steps.append({"name": text[:32], "detail": "", "io": ""})
+        if len(steps) < 3:
+            steps = [{"name": s["name"], "detail": s.get("detail", ""), "io": ""} for s in _steps_to_layers(
+                [format_body(str(s)) for s in raw_steps[:4]]
+            )]
+
+        title = smart_title(spec.title or "Method Pipeline")
+        if layout == "horizontal":
+            return self._logic_pipeline_horizontal(steps, title, name)
+        return self._logic_pipeline_vertical(steps, title, name)
+
+    def _logic_pipeline_vertical(self, steps: list[dict[str, str]], title: str, name: str) -> Path:
+        """纵向白底黑框流程图（对标参考海报 Methods）."""
+        font_title = _load_font(16, bold=True)
+        font_name = _load_font(12, bold=True)
+        font_detail = _load_font(10)
+        w = 560
+        box_w = w - 40
+        inner = box_w - 20
+        y = 36
+        row_heights: list[int] = []
+        for step in steps:
+            detail_lines = _wrap_to_width(step.get("detail", ""), font_detail, inner)[:2]
+            h = 14 + 16 + len(detail_lines) * 12 + 10
+            row_heights.append(max(h, 48))
+            y += max(h, 48) + 20
+        h = y + 4
+        img = Image.new("RGB", (w, h), (255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        tw = _text_w(title, font_title)
+        draw.text(((w - tw) // 2, 8), title, fill=FLOW_TITLE, font=font_title)
+        y = 36
+        for i, step in enumerate(steps):
+            row_h = row_heights[i]
+            _draw_academic_box(draw, 20, y, box_w, row_h)
+            cy = y + 8
+            for line in _wrap_to_width(step["name"], font_name, inner)[:1]:
+                draw.text((32, cy), line, fill=FLOW_TITLE, font=font_name)
+                cy += 15
+            for line in _wrap_to_width(step.get("detail", ""), font_detail, inner)[:2]:
+                draw.text((32, cy), line, fill=(80, 80, 80), font=font_detail)
+                cy += 12
+            if i < len(steps) - 1:
+                cx = w // 2
+                draw.line([(cx, y + row_h + 2), (cx, y + row_h + 16)], fill=ARROW_GRAY, width=2)
+                draw.polygon(
+                    [(cx - 4, y + row_h + 14), (cx + 4, y + row_h + 14), (cx, y + row_h + 19)],
+                    fill=ARROW_GRAY,
+                )
+            y += row_h + 20
+        out = self.output_dir / f"{name}.png"
+        img.save(out)
+        return out
+
+    def _logic_pipeline_horizontal(self, steps: list[dict[str, str]], title: str, name: str) -> Path:
+        """横向方法流程：适合 GRASP 等多模块 pipeline."""
+        n = len(steps)
+        font_title = _load_font(18, bold=True)
+        font_name = _load_font(12, bold=True)
+        font_detail = _load_font(10)
+        w = max(1100, 170 * n + 48)
+        box_w = max(155, (w - 48 - (n - 1) * 28) // max(n, 1))
+        h = 260
+        img = Image.new("RGB", (w, h), (248, 250, 252))
+        draw = ImageDraw.Draw(img)
+        tw = _text_w(title, font_title)
+        draw.text(((w - tw) // 2, 10), title, fill=(35, 45, 60), font=font_title)
+        gap = 28
+        start_x = (w - (n * box_w + (n - 1) * gap)) // 2
+        y = 42
+        for i, step in enumerate(steps):
+            x = start_x + i * (box_w + gap)
+            color = _hex_to_rgb(PALETTE[i % len(PALETTE)])
+            name_lines = _wrap_to_width(step["name"], font_name, box_w - 16)[:2]
+            detail_lines = _wrap_to_width(step.get("detail", ""), font_detail, box_w - 16)[:3]
+            box_h = max(120, 24 + len(name_lines) * 14 + len(detail_lines) * 11)
+            _draw_shadow_box(draw, x, y, box_w, box_h, color, radius=FLOW_RADIUS)
+            draw.rectangle([x, y, x + 6, y + box_h], fill=color)
+            cy = y + 8
+            for line in name_lines:
+                draw.text((x + 12, cy), line, fill=(25, 35, 50), font=font_name)
+                cy += 14
+            for line in detail_lines:
+                draw.text((x + 12, cy), line, fill=(60, 68, 82), font=font_detail)
+                cy += 11
+            if i < n - 1:
+                ax = x + box_w + 4
+                mid_y = y + box_h // 2
+                draw.line([(ax, mid_y), (ax + gap - 8, mid_y)], fill=(120, 130, 145), width=2)
+                draw.polygon(
+                    [(ax + gap - 12, mid_y - 5), (ax + gap - 12, mid_y + 5), (ax + gap - 4, mid_y)],
+                    fill=(120, 130, 145),
+                )
+        out = self.output_dir / f"{name}.png"
+        img.save(out)
+        return out
 
     def _flow_diagram_horizontal(self, steps: list[str], title: str, name: str) -> Path:
         n = len(steps)
@@ -209,6 +343,7 @@ class VisualGenerator:
         return out
 
     def _architecture(self, spec: VisualSpec, name: str) -> Path:
+        layout = str(spec.data.get("layout", "")).lower()
         layers = spec.data.get("layers") or []
         if not layers:
             steps = [format_body(str(s)) for s in (spec.data.get("steps") or [])]
@@ -218,10 +353,13 @@ class VisualGenerator:
                 [format_body(str(s)) for s in (spec.data.get("steps") or ["Input", "Process", "Output"])]
             )
 
-        font_title = _load_font(14, bold=True)
-        font_name = _load_font(12, bold=True)
-        font_detail = _load_font(10)
-        w = 520
+        if layout == "horizontal" and len(layers) >= 4:
+            return self._architecture_horizontal(layers, smart_title(spec.title or "Architecture"), name)
+
+        font_title = _load_font(16, bold=True)
+        font_name = _load_font(13, bold=True)
+        font_detail = _load_font(11)
+        w = 640
         box_w = w - 28
         inner_w = box_w - 20
         y = 34
@@ -263,10 +401,49 @@ class VisualGenerator:
         img.save(out)
         return out
 
+    def _architecture_horizontal(self, layers: list[dict], title: str, name: str) -> Path:
+        n = len(layers)
+        font_title = _load_font(18, bold=True)
+        font_name = _load_font(12, bold=True)
+        font_detail = _load_font(10)
+        w = max(1050, 165 * n + 40)
+        box_w = max(150, (w - 40 - (n - 1) * 24) // max(n, 1))
+        h = 240
+        img = Image.new("RGB", (w, h), (248, 250, 252))
+        draw = ImageDraw.Draw(img)
+        tw = _text_w(title, font_title)
+        draw.text(((w - tw) // 2, 8), title, fill=(35, 45, 60), font=font_title)
+        gap = 24
+        start_x = (w - (n * box_w + (n - 1) * gap)) // 2
+        y = 38
+        for i, layer in enumerate(layers):
+            x = start_x + i * (box_w + gap)
+            color = _hex_to_rgb(PALETTE[i % len(PALETTE)])
+            name_lines = _wrap_to_width(str(layer.get("name", "")), font_name, box_w - 14)[:2]
+            detail_lines = _wrap_to_width(str(layer.get("detail", "")), font_detail, box_w - 14)[:2]
+            box_h = max(110, 22 + len(name_lines) * 14 + len(detail_lines) * 11)
+            _draw_shadow_box(draw, x, y, box_w, box_h, color, radius=FLOW_RADIUS)
+            draw.rectangle([x, y, x + 5, y + box_h], fill=color)
+            cy = y + 8
+            for line in name_lines:
+                draw.text((x + 10, cy), line, fill=(30, 40, 55), font=font_name)
+                cy += 14
+            for line in detail_lines:
+                draw.text((x + 10, cy), line, fill=(70, 78, 92), font=font_detail)
+                cy += 11
+            if i < n - 1:
+                ax = x + box_w + 3
+                mid_y = y + box_h // 2
+                draw.line([(ax, mid_y), (ax + gap - 6, mid_y)], fill=(130, 140, 155), width=2)
+        out = self.output_dir / f"{name}.png"
+        img.save(out)
+        return out
+
     def _bullet_cards(self, spec: VisualSpec, name: str) -> Path:
         """结论等区块：编号要点卡，文字换行不截断."""
-        items = spec.data.get("items") or spec.data.get("steps") or []
-        items = [format_body(str(x)) for x in items][:3]
+        raw_items = spec.data.get("items") or spec.data.get("steps") or []
+        items = [_normalize_card_item(x) for x in raw_items][:3]
+        items = [format_body(x) for x in items if x.strip()]
         if not items:
             items = ["Takeaway"]
 
@@ -306,6 +483,59 @@ class VisualGenerator:
             for line in lines:
                 draw.text((x + 8, ty), line, fill=(45, 50, 60), font=font_txt)
                 ty += 13
+
+        out = self.output_dir / f"{name}.png"
+        img.save(out)
+        return out
+
+    def _data_table(self, spec: VisualSpec, name: str) -> Path:
+        """渲染论文关键实验数据表."""
+        headers = [str(h) for h in spec.data.get("headers", [])][:5]
+        rows = [[str(c) for c in row] for row in spec.data.get("rows", [])][:6]
+        caption = smart_title(str(spec.data.get("caption") or spec.title or "Results Table"))
+        if not headers or not rows:
+            headers = ["Method", "Metric"]
+            rows = [["—", "—"]]
+
+        n_cols = len(headers)
+        w = 520
+        pad = 10
+        col_w = (w - pad * 2) // n_cols
+        col_w = max(col_w, 72)
+        w = col_w * n_cols + pad * 2
+
+        font_cap = _load_font(11, bold=True)
+        font_hdr = _load_font(10, bold=True)
+        font_cell = _load_font(9)
+        row_h = 22
+        cap_lines = _wrap_to_width(caption, font_cap, w - pad * 2)[:2]
+        h = pad + len(cap_lines) * 14 + 8 + row_h * (len(rows) + 1) + pad
+
+        img = Image.new("RGB", (w, h), (255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        y = pad
+        for line in cap_lines:
+            draw.text((pad, y), line, fill=FLOW_TITLE, font=font_cap)
+            y += 14
+        y += 4
+        hdr_y = y
+        for j, hdr in enumerate(headers):
+            x = pad + j * col_w
+            draw.rectangle([x, hdr_y, x + col_w, hdr_y + row_h], fill=ACCENT_RGB)
+            txt = truncate_cell(hdr, font_hdr, col_w - 8)
+            draw.text((x + 6, hdr_y + 5), txt, fill=(255, 255, 255), font=font_hdr)
+        y = hdr_y + row_h
+        for i, row in enumerate(rows):
+            fill = (255, 255, 255) if i % 2 == 0 else BG_TABLE_ALT
+            for j in range(n_cols):
+                x = pad + j * col_w
+                draw.rectangle([x, y, x + col_w, y + row_h], fill=fill)
+                if j == 0:
+                    draw.line([(x, y), (x, y + row_h)], fill=(220, 220, 220), width=1)
+                draw.line([(x, y + row_h - 1), (x + col_w, y + row_h - 1)], fill=(220, 220, 220), width=1)
+                val = row[j] if j < len(row) else ""
+                draw.text((x + 6, y + 5), truncate_cell(val, font_cell, col_w - 10), fill=(40, 40, 40), font=font_cell)
+            y += row_h
 
         out = self.output_dir / f"{name}.png"
         img.save(out)
@@ -392,6 +622,11 @@ class VisualGenerator:
         return out
 
 
+def _draw_academic_box(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int) -> None:
+    """白底黑框步骤盒（参考海报 Methods 流程图）."""
+    draw.rectangle([x, y, x + w, y + h], fill=FLOW_FILL, outline=FLOW_BORDER, width=2)
+
+
 def _draw_shadow_box(
     draw: ImageDraw.ImageDraw,
     x: int,
@@ -455,6 +690,40 @@ def _text_w(text: str, font) -> int:
 def _hex_to_rgb(h: str) -> tuple[int, int, int]:
     h = h.lstrip("#")
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def truncate_cell(text: str, font, max_w: int) -> str:
+    text = str(text).strip()
+    if _text_w(text, font) <= max_w:
+        return text
+    while text and _text_w(text + "…", font) > max_w:
+        text = text[:-1]
+    return (text + "…") if text else "—"
+
+
+def _normalize_card_item(item) -> str:
+    if isinstance(item, dict):
+        parts: list[str] = []
+        for key in ("content", "title", "text", "body", "bullet", "summary", "description"):
+            val = item.get(key)
+            if val and str(val).strip():
+                parts.append(str(val).strip())
+        if parts:
+            return " — ".join(parts)
+        for val in item.values():
+            if isinstance(val, str) and len(val.strip()) > 12:
+                return val.strip()
+        return ""
+    text = str(item).strip()
+    if text.startswith("{") and "content" in text:
+        import ast
+        try:
+            parsed = ast.literal_eval(text)
+            if isinstance(parsed, dict):
+                return _normalize_card_item(parsed)
+        except (ValueError, SyntaxError):
+            pass
+    return text
 
 
 def _normalize_stat_cards(cards: list) -> list[dict]:
@@ -521,6 +790,16 @@ def _wrap_to_width(text: str, font, max_w: int) -> list[str]:
             cur = word
     lines.append(_truncate_to_width(cur, font, max_w))
     return lines
+
+
+def _format_bar_value(val) -> str:
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return str(val)
+    if abs(v) < 10 and abs(v - round(v)) > 0.001:
+        return f"{v:.2f}".rstrip("0").rstrip(".")
+    return f"{v:.0f}" if isinstance(val, float) else str(val)
 
 
 def _align_label_values(

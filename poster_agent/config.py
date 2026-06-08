@@ -22,14 +22,23 @@ class LLMConfig:
 
 @dataclass
 class PosterConfig:
-    width: int = 2400
-    height: int = 3600
-    margin: int = 60
+    # 横版 3:2（对标本科/会议参考海报）；竖版可用 width=2400, height=3600
+    width: int = 3600
+    height: int = 2400
+    margin: int = 48
     score_threshold: float = 0.85
     max_iterations: int = 5
     inner_paint_passes: int = 1  # Painter–Commenter 内层重绘次数（Paper2Poster）
-    min_body_font: int = 34
-    min_title_font: int = 42
+    min_body_font: int = 30
+    min_title_font: int = 38
+    parser_max_chars: int = 42000
+    prefer_paper_figures: bool = True
+    max_figures_per_section: int = 2
+    academic_style: bool = True
+    three_column_layout: bool = True
+    merge_abstract_into_intro: bool = True
+    # 左 25% | 中 50% (Results) | 右 25% — 与 ORF3a 参考海报一致
+    column_fracs: tuple[float, float, float] = (0.25, 0.50, 0.25)
     section_weights: dict[str, float] = field(
         default_factory=lambda: {
             "title": 0.12,
@@ -49,6 +58,7 @@ class Config:
     poster: PosterConfig = field(default_factory=PosterConfig)
     project_root: Path = PROJECT_ROOT
     output_dir: Path = OUTPUT_DIR
+    output_base_dir: Path = OUTPUT_DIR  # 各论文子文件夹的根目录
 
     @classmethod
     def load(cls, api_key_path: Path | None = None) -> Config:
@@ -57,6 +67,7 @@ class Config:
         if key_file.exists():
             cfg.llm.api_key = _read_api_key_file(key_file)
         cfg.llm.api_key = cfg.llm.api_key or os.getenv("DEEPSEEK_API_KEY", "")
+        cfg.output_base_dir = OUTPUT_DIR
         cfg.output_dir.mkdir(parents=True, exist_ok=True)
         SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
         return cfg
