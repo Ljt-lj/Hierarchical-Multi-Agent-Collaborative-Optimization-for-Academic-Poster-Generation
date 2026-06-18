@@ -33,8 +33,19 @@ class ControllerAgent:
         )
         return score, should_stop
 
-    def build_refiner_feedback(self, score: EvaluationScore, logic_issues: list[str]) -> str:
+    def build_refiner_feedback(
+        self,
+        score: EvaluationScore,
+        logic_issues: list[str],
+        *,
+        error_feedback: str = "",
+        refiner_instructions: str = "",
+    ) -> str:
         parts = [score.feedback] if score.feedback else []
+        if error_feedback:
+            parts.append(error_feedback)
+        if refiner_instructions:
+            parts.append(refiner_instructions)
         parts.extend(logic_issues)
         parts.append(
             f"当前综合评分 {score.overall:.2f}，目标 {self.config.score_threshold}。"

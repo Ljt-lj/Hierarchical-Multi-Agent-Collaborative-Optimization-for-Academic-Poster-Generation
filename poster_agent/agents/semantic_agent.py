@@ -13,16 +13,18 @@ class SemanticCheckAgent:
 
     def check(self, content_tree: ContentNode, language: str = "en") -> tuple[float, list[str]]:
         system = (
-            "You are an academic logic reviewer. Check cross-section semantic consistency of the poster content tree. "
-            "Focus: whether experiments match methods; whether conclusions support experiments; whether introduction questions are addressed. "
+            "You are an academic logic reviewer. Check whether the poster content tree explains "
+            "the paper's WORKFLOW and VALIDATION chain (not just keyword summaries). "
+            "Focus: causal links between sections; method steps match results metrics; "
+            "introduction problem is addressed in method/results. "
             "Output JSON: {score: 0-1, issues: [descriptions], suggestions: [improvements]}. "
             + language_instruction(language)
         )
         if language == "zh":
             system = (
-                "你是学术论文逻辑审查专家。检查海报内容树的跨章节语义一致性。"
-                "重点：实验结果是否对应方法；结论是否支撑实验；引言问题是否在方法中回应。"
-                "输出 JSON：{score: 0-1, issues: [具体问题描述], suggestions: [改进建议]}。"
+                "检查海报内容树是否清晰解释了论文的方法流程与验证链（而非关键词堆砌）。"
+                "重点：章节间因果衔接；方法步骤与结果指标对应；引言问题在方法/结果中得到回应。"
+                "输出 JSON：{score, issues, suggestions}。"
                 + language_instruction(language)
             )
         user = (
@@ -50,8 +52,10 @@ def _content_to_text(node: ContentNode, language: str = "en", indent: int = 0) -
     none_label = "none" if language == "en" else "无"
     links = ", ".join(str(x) for x in node.logic_links) if node.logic_links else none_label
     lines = [
+        f"{pad}[{node.title}] weight={node.weight:.2f}",
         f"{pad}  summary: {node.summary}",
         f"{pad}  bullets: {'; '.join(node.bullets)}",
+        f"{pad}  logic_links: {links}",
     ]
     for c in node.children:
         lines.append(_content_to_text(c, language, indent + 1))

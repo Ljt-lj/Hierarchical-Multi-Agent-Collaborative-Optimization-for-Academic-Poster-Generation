@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+from poster_agent.models.render_report import PosterRenderReport
 from poster_agent.models.trees import LayoutRect, PosterNode
 
 
 class BalanceAgent:
-    def evaluate(self, poster_tree: PosterNode) -> tuple[float, dict[str, float]]:
+    def evaluate(
+        self,
+        poster_tree: PosterNode,
+        render_report: PosterRenderReport | None = None,
+    ) -> tuple[float, dict[str, float]]:
         leaves = _collect_leaves(poster_tree)
         if not leaves:
-            return 0.5, {"alignment": 0.5, "whitespace": 0.5, "density": 0.5}
+            return 0.5, {"alignment": 0.5, "whitespace": 0.5, "density": 0.5, "overflow": 0.0}
 
         canvas_area = poster_tree.rect.width * poster_tree.rect.height
         used_area = sum(n.rect.area for n in leaves)
@@ -21,11 +26,29 @@ class BalanceAgent:
         density_scores = [_density_score(n) for n in leaves]
         density_score = sum(density_scores) / len(density_scores)
 
-        overall = 0.35 * align_score + 0.35 * whitespace_score + 0.30 * density_score
+        overflow_penalty = 0.0
+        sparse_penalty = 0.0
+        if render_report:
+            overflow_rate = render_report.overflow_rate()
+            sparse_count = len(render_report.sparse_sections)
+            overflow_penalty = overflow_rate * 0.35
+            sparse_penalty = min(sparse_count / max(len(render_report.sections), 1), 1.0) * 0.2
+            if render_report.sparse_sections:
+                density_score *= max(0.55, 1.0 - sparse_penalty)
+
+        overall = (
+            0.30 * align_score
+            + 0.30 * whitespace_score
+            + 0.25 * density_score
+            + 0.15 * (1.0 - overflow_penalty)
+        )
+        overall = max(0.0, min(1.0, overall - sparse_penalty * 0.1))
         metrics = {
             "alignment": round(align_score, 3),
             "whitespace": round(whitespace_score, 3),
             "density": round(density_score, 3),
+            "overflow": round(overflow_penalty, 3),
+            "sparse_sections": len(render_report.sparse_sections) if render_report else 0,
         }
         return overall, metrics
 

@@ -27,8 +27,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--output-name",
-        default="poster",
-        help="输出文件前缀（默认 poster）",
+        default="auto",
+        help="输出文件前缀（默认 auto：按时间戳+论文名自动生成）",
     )
     parser.add_argument(
         "--model",

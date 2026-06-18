@@ -12,17 +12,23 @@ from poster_agent.models.visuals import VisualSpec
 class RawNode:
     title: str
     content: str
+    authors: str = ""
     level: int = 1
     images: list[str] = field(default_factory=list)
     children: list[RawNode] = field(default_factory=list)
+    tables: list[dict] = field(default_factory=list)
+    figure_catalog: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "title": self.title,
             "content": self.content,
+            "authors": self.authors,
             "level": self.level,
             "images": self.images,
             "children": [c.to_dict() for c in self.children],
+            "tables": self.tables,
+            "figure_catalog": self.figure_catalog,
         }
 
     @classmethod
@@ -30,9 +36,12 @@ class RawNode:
         return cls(
             title=data.get("title", ""),
             content=data.get("content", ""),
+            authors=data.get("authors", ""),
             level=data.get("level", 1),
             images=data.get("images", []),
             children=[cls.from_dict(c) for c in data.get("children", [])],
+            tables=data.get("tables") or [],
+            figure_catalog=data.get("figure_catalog") or [],
         )
 
 
@@ -45,7 +54,10 @@ class ContentNode:
     logic_links: list[str] = field(default_factory=list)
     visuals: list[VisualSpec] = field(default_factory=list)
     image_paths: list[str] = field(default_factory=list)
+    figure_captions: list[str] = field(default_factory=list)
+    paper_tables: list[dict] = field(default_factory=list)
     children: list[ContentNode] = field(default_factory=list)
+    block_style: str = "section"  # section | panel
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,18 +68,33 @@ class ContentNode:
             "logic_links": self.logic_links,
             "visuals": [v.to_dict() for v in self.visuals],
             "image_paths": self.image_paths,
+            "figure_captions": self.figure_captions,
+            "paper_tables": self.paper_tables,
             "children": [c.to_dict() for c in self.children],
+            "block_style": self.block_style,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ContentNode:
-        links = data.get("logic_links", [])
-        normalized_links = []
+        links_raw = data.get("logic_links", [])
+        if isinstance(links_raw, str):
+            links = [links_raw] if links_raw.strip() else []
+        elif isinstance(links_raw, list):
+            links = links_raw
+        else:
+            links = []
+        normalized_links: list[str] = []
         for link in links:
             if isinstance(link, str):
                 normalized_links.append(link)
             elif isinstance(link, dict):
-                normalized_links.append(str(link.get("target", link.get("relation", link))))
+                src = link.get("from", link.get("source", ""))
+                tgt = link.get("to", link.get("target", ""))
+                rel = link.get("relation", link.get("desc", ""))
+                if src and tgt:
+                    normalized_links.append(f"{src}→{tgt}: {rel}".strip(": "))
+                else:
+                    normalized_links.append(str(link.get("target", link)))
             else:
                 normalized_links.append(str(link))
         weight_raw = data.get("weight")
@@ -82,7 +109,10 @@ class ContentNode:
             logic_links=normalized_links,
             visuals=[VisualSpec.from_dict(v) if isinstance(v, dict) else v for v in visuals_raw],
             image_paths=data.get("image_paths") or [],
+            figure_captions=data.get("figure_captions") or [],
+            paper_tables=data.get("paper_tables") or [],
             children=[cls.from_dict(c) for c in data.get("children", [])],
+            block_style=data.get("block_style", "section"),
         )
 
 
@@ -112,11 +142,14 @@ class PosterNode:
     image_paths: list[str] = field(default_factory=list)
     visual_path: str | None = None
     visual_type: str | None = None
+    figure_captions: list[str] = field(default_factory=list)
+    table_caption: str = ""
     layout_mode: str = "text_only"
     full_width: bool = False
     accent_color: tuple[int, int, int] = (52, 99, 170)
     section_icon: str | None = None
     is_header: bool = False
+    block_style: str = "section"
     children: list[PosterNode] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -138,11 +171,14 @@ class PosterNode:
             "image_paths": self.image_paths,
             "visual_path": self.visual_path,
             "visual_type": self.visual_type,
+            "figure_captions": self.figure_captions,
+            "table_caption": self.table_caption,
             "layout_mode": self.layout_mode,
             "full_width": self.full_width,
             "accent_color": self.accent_color,
             "section_icon": self.section_icon,
             "is_header": self.is_header,
+            "block_style": self.block_style,
             "children": [c.to_dict() for c in self.children],
         }
 
@@ -173,11 +209,14 @@ class PosterNode:
             image_paths=list(data.get("image_paths") or []),
             visual_path=data.get("visual_path"),
             visual_type=data.get("visual_type"),
+            figure_captions=list(data.get("figure_captions") or []),
+            table_caption=str(data.get("table_caption") or ""),
             layout_mode=data.get("layout_mode", "text_only"),
             full_width=bool(data.get("full_width", False)),
             accent_color=tup("accent_color", (52, 99, 170)),
             section_icon=data.get("section_icon"),
             is_header=bool(data.get("is_header", False)),
+            block_style=data.get("block_style", "section"),
             children=[cls.from_dict(c) for c in data.get("children", [])],
         )
 

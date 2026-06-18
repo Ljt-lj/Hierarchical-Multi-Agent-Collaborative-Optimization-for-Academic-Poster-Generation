@@ -19,6 +19,7 @@ class CommenterAgent:
         image_path: Path | None = None,
         balance_metrics: dict[str, float] | None = None,
         language: str = "en",
+        render_issues: str = "",
     ) -> tuple[float, float, str]:
         layout_desc = _describe_layout(poster_tree)
         metrics_text = ""
@@ -27,14 +28,26 @@ class CommenterAgent:
                 metrics_text = (
                     f"\n布局指标：对齐={balance_metrics.get('alignment')}, "
                     f"留白={balance_metrics.get('whitespace')}, "
-                    f"密度={balance_metrics.get('density')}"
+                    f"密度={balance_metrics.get('density')}, "
+                    f"溢出惩罚={balance_metrics.get('overflow')}, "
+                    f"稀疏区块={balance_metrics.get('sparse_sections', 0)}"
                 )
             else:
                 metrics_text = (
                     f"\nLayout metrics: alignment={balance_metrics.get('alignment')}, "
                     f"whitespace={balance_metrics.get('whitespace')}, "
-                    f"density={balance_metrics.get('density')}"
+                    f"density={balance_metrics.get('density')}, "
+                    f"overflow_penalty={balance_metrics.get('overflow')}, "
+                    f"sparse_sections={balance_metrics.get('sparse_sections', 0)}"
                 )
+
+        render_text = ""
+        if render_issues:
+            render_text = (
+                f"\n\nRender diagnostics (Paper2Poster Commenter):\n{render_issues}"
+                if language == "en"
+                else f"\n\n渲染诊断（Paper2Poster Commenter）：\n{render_issues}"
+            )
 
         system = (
             "You are an academic poster reviewer. From layout description and metrics, evaluate: "
@@ -52,9 +65,9 @@ class CommenterAgent:
                 + language_instruction(language)
             )
         user = (
-            f"Poster layout:\n{layout_desc}{metrics_text}"
+            f"Poster layout:\n{layout_desc}{metrics_text}{render_text}"
             if language == "en"
-            else f"海报布局：\n{layout_desc}{metrics_text}"
+            else f"海报布局：\n{layout_desc}{metrics_text}{render_text}"
         )
         if image_path and image_path.exists():
             user += (
